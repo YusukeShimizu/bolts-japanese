@@ -1,0 +1,6 @@
+# OpenAI's API Key. You will be charged for the usage of this key.
+OPENAI_API_KEY="sk-xxx"
+# Default language model.
+MODEL_NAME="gpt-4o"
+# Transforms the input path to the output file path.
+OUTPUT_FILE_PATTERN="{dir}/{basename}-ja.md"
