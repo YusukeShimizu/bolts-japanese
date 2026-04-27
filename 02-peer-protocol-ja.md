@@ -1,18 +1,18 @@
 # BOLT #2: チャネル管理のためのピアプロトコル
 
-ピアチャネルプロトコルには、確立、通常運用、閉鎖の三つのフェーズがあります。
+ピアチャネルプロトコルには、確立、通常運用、クローズの 3 つのフェーズがあります。
 
 # 目次
 
   * [チャネル](#channel)
     * [`channel_id` の定義](#definition-of-channel_id)
-    * [インタラクティブなトランザクション構築](#interactive-transaction-construction)
+    * [interactive-tx によるトランザクション構築](#interactive-transaction-construction)
       * [セットアップと用語](#set-up-and-vocabulary)
       * [手数料の責任](#fee-responsibility)
       * [概要](#overview)
       * [`tx_add_input` メッセージ](#the-tx_add_input-message)
       * [`tx_add_output` メッセージ](#the-tx_add_output-message)
-      * [`tx_remove_input` と `tx_remove_output` メッセージ](#the-tx_remove_input-and-tx_remove_output-messages)
+      * [`tx_remove_input` および `tx_remove_output` メッセージ](#the-tx_remove_input-and-tx_remove_output-messages)
       * [`tx_complete` メッセージ](#the-tx_complete-message)
       * [`tx_signatures` メッセージ](#the-tx_signatures-message)
       * [`tx_init_rbf` メッセージ](#the-tx_init_rbf-message)
@@ -29,48 +29,55 @@
       * [`accept_channel2` メッセージ](#the-accept_channel2-message)
       * [資金構成](#funding-composition)
       * [`commitment_signed` メッセージ](#the-commitment_signed-message)
-      * 資金署名の共有：`tx_signatures`](#sharing-funding-signatures-tx_signatures)
-      * 手数料の引き上げ：`tx_init_rbf` と `tx_ack_rbf`](#fee-bumping-tx_init_rbf-and-tx_ack_rbf)
-    * [チャネルの静止](#channel-quiescence)
-    * [チャネルの閉鎖](#channel-close)
-      * 閉鎖の開始：`shutdown`](#closing-initiation-shutdown)
-      * 閉鎖交渉：`closing_signed`](#closing-negotiation-closing_signed)
+      * [資金調達署名の共有：`tx_signatures`](#sharing-funding-signatures-tx_signatures)
+      * [手数料の引き上げ：`tx_init_rbf` と `tx_ack_rbf`](#fee-bumping-tx_init_rbf-and-tx_ack_rbf)
+    * [チャネルのクワイエセンス](#channel-quiescence)
+    * [チャネルスプライシング](#channel-splicing)
+      * [`splice_init` メッセージ](#the-splice_init-message)
+      * [`splice_ack` メッセージ](#the-splice_ack-message)
+      * [スプライストランザクションの構築](#splice-transaction-construction)
+      * [スプライスの完了](#splice-completion)
+    * [チャネルクローズ](#channel-close)
+      * [クローズの開始：`shutdown`](#closing-initiation-shutdown)
+      * [クローズ交渉：`closing_complete` と `closing_sig`](#closing-negotiation-closing_complete-and-closing_sig)
+      * [レガシークローズ交渉：`closing_signed`](#legacy-closing-negotiation-closing_signed)
     * [通常運用](#normal-operation)
-      * HTLC の転送](#forwarding-htlcs)
-      * `cltv_expiry_delta` の選択](#cltv_expiry_delta-selection)
-      * HTLC の追加：`update_add_htlc`](#adding-an-htlc-update_add_htlc)
-      * HTLC の削除：`update_fulfill_htlc`、`update_fail_htlc`、および `update_fail_malformed_htlc`](#removing-an-htlc-update_fulfill_htlc-update_fail_htlc-and-update_fail_malformed_htlc)
-      * これまでの更新のコミット：`commitment_signed`](#committing-updates-so-far-commitment_signed)
-      * 更新された状態への移行の完了：`revoke_and_ack`](#completing-the-transition-to-the-updated-state-revoke_and_ack)
-      * 手数料の更新：`update_fee`](#updating-fees-update_fee)
-    * メッセージの再送信：`channel_reestablish` メッセージ](#message-retransmission)
+      * [HTLC の転送](#forwarding-htlcs)
+      * [`cltv_expiry_delta` の選択](#cltv_expiry_delta-selection)
+      * [HTLC の追加：`update_add_htlc`](#adding-an-htlc-update_add_htlc)
+      * [HTLC の削除：`update_fulfill_htlc`、`update_fail_htlc`、および `update_fail_malformed_htlc`](#removing-an-htlc-update_fulfill_htlc-update_fail_htlc-and-update_fail_malformed_htlc)
+      * [チャネルメッセージのバッチ処理](#batching-channel-messages)
+      * [これまでの更新のコミット：`commitment_signed`](#committing-updates-so-far-commitment_signed)
+      * [更新された状態への移行の完了：`revoke_and_ack`](#completing-the-transition-to-the-updated-state-revoke_and_ack)
+      * [手数料の更新：`update_fee`](#updating-fees-update_fee)
+    * [メッセージの再送信：`channel_reestablish` メッセージ](#message-retransmission)
   * [著者](#authors)
 
 # チャネル
 
 ## `channel_id` の定義
 
-いくつかのメッセージは、チャネルを識別するために `channel_id` を使用します。これは、`funding_txid` と `funding_output_index` を組み合わせて、ビッグエンディアンの排他的論理和 (すなわち、`funding_output_index` が最後の 2 バイトを変更) を用いて資金調達トランザクションから導出されます。
+いくつかのメッセージはチャネルを識別するために `channel_id` を使用します。これは資金調達トランザクションから導出され、`funding_txid` と `funding_output_index` をビッグエンディアンで排他的論理和することで得られます (つまり `funding_output_index` が末尾 2 バイトを変更します)。
 
-チャネルの確立前には、ランダムなノンスである `temporary_channel_id` が使用されます。
+チャネル確立前は、ランダムなノンスである `temporary_channel_id` が使用されます。
 
-異なるピアからの重複した `temporary_channel_id` が存在する可能性があることに注意してください。資金調達トランザクションが作成される前にチャネルをそのチャネル ID で参照する API は本質的に安全ではありません。資金調達が作成される前に交換された唯一のプロトコル提供のチャネル識別子は、(source_node_id, destination_node_id, temporary_channel_id) タプルです。資金調達トランザクションが確認される前にチャネルをそのチャネル ID で参照する API は永続的ではないことにも注意してください。資金調達出力に対応するスクリプト pubkey を知るまでは、重複するチャネル ID を防ぐものはありません。
+異なるピアから重複する `temporary_channel_id` が存在する可能性がある点に注意してください。そのため、資金調達トランザクションが作成される前にチャネル ID でチャネルを参照する API は本質的に安全ではありません。資金調達トランザクション作成前に交換される唯一のプロトコル提供チャネル識別子は (source_node_id, destination_node_id, temporary_channel_id) のタプルです。また、資金調達トランザクションが確認される前にチャネル ID でチャネルを参照する API は永続的でもありません。資金調達出力に対応する scriptpubkey が判明するまで、重複したチャネル ID の発生を防ぐ手段はないためです。
 
 ### `channel_id`, v2
 
-v2 プロトコルを使用して確立されたチャネルの場合、`channel_id` は `SHA256(lesser-revocation-basepoint || greater-revocation-basepoint)` です。ここで、lesser と greater はベースポイントの順序に基づいています。
+v2 プロトコルで確立されたチャネルの `channel_id` は `SHA256(lesser-revocation-basepoint || greater-revocation-basepoint)` です。ここで lesser と greater はベースポイントの順序に基づきます。
 
-`open_channel2` を送信する際、ピアの取り消しベースポイントは不明です。非イニシエータのためにゼロで埋められたベースポイントを使用して `temporary_channel_id` を計算する必要があります。
+`open_channel2` を送信する時点ではピアの取り消しベースポイントは未知です。そのため、非イニシエータのベースポイントとしてゼロ埋めされた値を用いて `temporary_channel_id` を計算しなければなりません。
 
-`accept_channel2` を送信する際、`open_channel2` からの `temporary_channel_id` を使用して、イニシエータがリクエストに対する応答を一致させることができるようにする必要があります。
+`accept_channel2` を送信する際は、イニシエータがリクエストと応答を対応付けられるよう、`open_channel2` の `temporary_channel_id` をそのまま使用しなければなりません。
 
-#### 理論的根拠
+#### 根拠
 
-取り消しベースポイントは、正しい操作のために両方のピアによって記憶される必要があります。最初のメッセージ交換後に知られるため、後続のメッセージで `temporary_channel_id` の必要性がなくなります。両側からの情報を混ぜることで、`channel_id` の衝突を避け、資金調達 txid への依存を排除します。
+取り消しベースポイントは、正しい動作のために両方のピアが記憶しておく必要があります。最初のメッセージ交換後にこれが分かるため、それ以降のメッセージでは `temporary_channel_id` を使う必要がなくなります。両側の情報を混ぜることで `channel_id` の衝突を避け、資金調達 txid への依存も排除できます。
 
-## インタラクティブなトランザクション構築
+## interactive-tx によるトランザクション構築
 
-インタラクティブなトランザクション構築により、2 つのピアが共同でブロードキャスト用のトランザクションを構築することができます。このプロトコルは、デュアルファンドチャネル確立 (v2) の基盤です。
+interactive-tx (インタラクティブなトランザクション構築) により、2 つのピアが協力してブロードキャスト用トランザクションを構築できます。このプロトコルはデュアルファンドチャネル確立 (v2) の基盤です。
 
 ### セットアップと用語
 
@@ -94,13 +101,13 @@ v2 プロトコルを使用して確立されたチャネルの場合、`channel
   - output count
   - locktime
 
-トランザクションの残りのバイトの手数料は、`tx_add_input` または `tx_add_output` を通じてそのインプットまたはアウトプットを提供したピアが、合意された `feerate` に基づいて負担します。
+トランザクションの残りのバイトの手数料は、`tx_add_input` または `tx_add_output` を通じてその入力または出力を提供したピアが、合意された `feerate` に基づいて負担します。
 
 ### 概要
 
-*イニシエータ* は `tx_add_input` を用いてインタラクティブなトランザクション構築プロトコルを開始します。*非イニシエータ* は `tx_add_input`、`tx_add_output`、`tx_remove_input`、`tx_remove_output`、または `tx_complete` のいずれかで応答します。プロトコルは、両方のノードが連続した `tx_complete` を送受信するまで、インタラクティブなトランザクションプロトコルメッセージの同期交換を続けます。これはターンベースのプロトコルです。
+*イニシエータ* は `tx_add_input` で interactive-tx 構築プロトコルを開始します。*非イニシエータ* は `tx_add_input`、`tx_add_output`、`tx_remove_input`、`tx_remove_output`、または `tx_complete` のいずれかで応答します。プロトコルは、両ノードが連続して `tx_complete` を送受信するまで interactive-tx プロトコルメッセージの同期的な交換を続けます。これはターン制のプロトコルです。
 
-ピアが連続した `tx_complete` を交換すると、インタラクティブなトランザクション構築プロトコルは終了したと見なされます。両方のピアはトランザクションを構築し、エラーが発見された場合は交渉を失敗させるべきです。
+両ピアが連続して `tx_complete` を交換した時点で、interactive-tx 構築プロトコルは完了したとみなします。両ピアはトランザクションを構築すべきで、エラーがあれば交渉を失敗させるべきです。
 
 このプロトコルは、並行して複数のパーティが単一のトランザクションを共同で構築できるように明示的に設計されています。これにより、単一のトランザクションで複数のチャネルを開く能力が保持されます。`serial_id` は一般的にランダムに選ばれますが、すべてのピアセッションで一貫したトランザクション順序を維持するために、受信した `serial_id` を他のピアに転送する際に再利用し、必要に応じてパリティ要件を満たすために下位ビットを反転させるのが最も簡単です。
 
@@ -108,90 +115,98 @@ v2 プロトコルを使用して確立されたチャネルの場合、`channel
 
 #### *initiator* のみ
 
-A は *initiator* で、2 つのインプットと 1 つのアウトプット (ファンディングアウトプット) を持っています。B は *non-initiator* で、何も提供しません。
+A は *initiator* で、2 つの入力と 1 つの出力 (資金調達出力) を持っています。B は *non-initiator* で、何も提供しません。
 
-```
-    +-------+                       +-------+
-    |       |--(1)- tx_add_input -->|       |
-    |       |<-(2)- tx_complete ----|       |
-    |       |--(3)- tx_add_input -->|       |
-    |   A   |<-(4)- tx_complete ----|   B   |
-    |       |--(5)- tx_add_output ->|       |
-    |       |<-(6)- tx_complete ----|       |
-    |       |--(7)- tx_complete --->|       |
-    +-------+                       +-------+
-```
+        +-------+                       +-------+
+        |       |--(1)- tx_add_input -->|       |
+        |       |<-(2)- tx_complete ----|       |
+        |       |--(3)- tx_add_input -->|       |
+        |   A   |<-(4)- tx_complete ----|   B   |
+        |       |--(5)- tx_add_output ->|       |
+        |       |<-(6)- tx_complete ----|       |
+        |       |--(7)- tx_complete --->|       |
+        +-------+                       +-------+
 
 #### *initiator* と *non-initiator*
 
-A は *initiator* で、2 つのインプットと 1 つのアウトプットを提供し、その後それを削除します。B は *non-initiator* で、1 つのインプットと 1 つのアウトプットを提供しますが、A が 2 番目のインプットを追加するまで待ちます。
+A は *initiator* で、2 つの入力と 1 つの出力を提供し、その後それを削除します。B は *non-initiator* で、1 つの入力と 1 つの出力を提供しますが、A が 2 番目の入力を追加するまで待ちます。
 
-A が 2 番目のインプットを送信しない場合、交渉は B の貢献なしに終了します。
+A が 2 番目の入力を送信しない場合、交渉は B の貢献なしに終了します。
 
-```
-    +-------+                         +-------+
-    |       |--(1)- tx_add_input ---->|       |
-    |       |<-(2)- tx_complete ------|       |
-    |       |--(3)- tx_add_output --->|       |
-    |       |<-(4)- tx_complete ------|       |
-    |       |--(5)- tx_add_input ---->|       |
-    |   A   |<-(6)- tx_add_input -----|   B   |
-    |       |--(7)- tx_remove_output >|       |
-    |       |<-(8)- tx_add_output ----|       |
-    |       |--(9)- tx_complete ----->|       |
-    |       |<-(10) tx_complete ------|       |
-    +-------+                         +-------+
-```
+        +-------+                         +-------+
+        |       |--(1)- tx_add_input ---->|       |
+        |       |<-(2)- tx_complete ------|       |
+        |       |--(3)- tx_add_output --->|       |
+        |       |<-(4)- tx_complete ------|       |
+        |       |--(5)- tx_add_input ---->|       |
+        |   A   |<-(6)- tx_add_input -----|   B   |
+        |       |--(7)- tx_remove_output >|       |
+        |       |<-(8)- tx_add_output ----|       |
+        |       |--(9)- tx_complete ----->|       |
+        |       |<-(10) tx_complete ------|       |
+        +-------+                         +-------+
 
 ### `tx_add_input` メッセージ
 
-このメッセージはトランザクションインプットを含みます。
+このメッセージはトランザクションの入力を 1 つ含みます。
 
-1. タイプ: 66 (`tx_add_input`)
-2. データ:
+1. type: 66 (`tx_add_input`)
+2. data:
     * [`channel_id`:`channel_id`]
     * [`u64`:`serial_id`]
     * [`u16`:`prevtx_len`]
     * [`prevtx_len*byte`:`prevtx`]
     * [`u32`:`prevtx_vout`]
     * [`u32`:`sequence`]
+    * [`tx_add_input_tlvs`:`tlvs`]
+
+1. `tlv_stream`: `tx_add_input_tlvs`
+2. types:
+   1. type: 0 (`shared_input_txid`)
+   2. data:
+     * [`sha256`:`funding_txid`]
 
 #### 要件
 
-送信ノードは以下を行います：
-  - 送信されたすべてのインプットをトランザクションに追加しなければなりません
-  - 現在トランザクションに追加されている各インプットに対してユニークな `serial_id` を使用しなければなりません
-  - `sequence` を 4294967293 (`0xFFFFFFFD`) 以下に設定しなければなりません
-  - ピアから受信したインプットを再送信してはなりません
-  - *initiator* の場合：
-    - 偶数の `serial_id` を送信しなければなりません
-  - *non-initiator* の場合：
-    - 奇数の `serial_id` を送信しなければなりません
+送信ノード:
+  - 送信したすべての入力をトランザクションに追加しなければなりません。
+  - 現在トランザクションに追加されている各入力に対し、一意な `serial_id` を使用しなければなりません。
+  - `sequence` を 4294967293 (`0xFFFFFFFD`) 以下に設定しなければなりません。
+  - ピアから受信した入力を再送信してはなりません。
+  - *initiator* の場合:
+    - 偶数の `serial_id` を送信しなければなりません。
+  - *non-initiator* の場合:
+    - 奇数の `serial_id` を送信しなければなりません。
 
-受信ノード：
+受信ノード:
 
-- 受信したすべての入力をトランザクションに追加しなければなりません
-- 以下の場合、交渉を失敗させなければなりません：
-  - `sequence` が `0xFFFFFFFE` または `0xFFFFFFFF` に設定されている
-  - `prevtx` と `prevtx_vout` が以前に追加された（削除されていない）入力と同一である
-  - `prevtx` が有効なトランザクションでない
-  - `prevtx_vout` が `prevtx` の出力数以上である
-  - `prevtx` の `prevtx_vout` 出力の `scriptPubKey` が、1 バイトのプッシュオペコード（数値 `0` から `16`）に続いて 2 バイトから 40 バイトのデータプッシュでない
-  - `serial_id` がすでにトランザクションに含まれている
-  - `serial_id` のパリティが間違っている
-  - この交渉中に 4096 の `tx_add_input` メッセージを受信した場合
+- 受信したすべての入力をトランザクションに追加しなければなりません。
+- 以下のいずれかに該当する場合、交渉を失敗させなければなりません:
+  - `sequence` が `0xFFFFFFFE` または `0xFFFFFFFF` に設定されている。
+  - `prevtx_len` が `0` の場合:
+    - `shared_input_txid` が設定されていない。
+    - `shared_input_txid` および `prevtx_vout` が以前の資金調達出力と一致しない。
+    - `shared_input_txid` が設定された入力がすでに追加されている (かつ削除されていない)。
+  - `prevtx_len` が `0` でない場合:
+    - `prevtx` と `prevtx_vout` が以前に追加された (削除されていない) 入力と同一である。
+    - `prevtx` が有効なトランザクションでない。
+    - `prevtx_vout` が `prevtx` の出力数以上である。
+    - `prevtx` の `prevtx_vout` 出力の `scriptPubKey` が「1 バイトのプッシュオペコード (数値 `0` から `16`) のあとに 2 から 40 バイトのデータプッシュが続く形」になっていない。
+  - `serial_id` がすでにトランザクションに含まれている。
+  - `serial_id` のパリティが誤っている。
+  - この交渉中に 4096 個の `tx_add_input` メッセージを受信している。
 
-#### 理論的根拠
+#### 根拠
 
-各ノードはトランザクション入力のセットを知っていなければなりません。*非イニシエータ* はこのメッセージを省略してもかまいません。
+各ノードはトランザクションの入力集合を把握しなければなりません。*非イニシエータ* はこのメッセージを省略してもよいです。
 
-`serial_id` はこの入力を一意に識別するランダムに選ばれた番号です。構築されたトランザクションの入力は `serial_id` によってソートされなければなりません。
+`serial_id` はこの入力を一意に識別するためにランダムに選ばれる番号です。構築後のトランザクション内の入力は `serial_id` でソートされなければなりません。
 
-`prevtx` はこの入力が消費する出力を含むシリアライズされたトランザクションです。入力が改ざんされていないことを確認するために使用されます。
+`prevtx` は、この入力が消費する出力を含むシリアライズ済みトランザクションです。入力が改ざんされていない (non-malleable) ことを検証するために使用します。両ピアがその入力が non-malleable であると既に分かっている場合 (例えば前回の資金調達出力である場合) は、`prevtx_len` を `0` にして `prevtx` を省略できます。
 
-`prevtx_vout` は消費される出力のインデックスです。
+`prevtx_vout` は消費する出力のインデックスです。
 
-`sequence` はこの入力のシーケンス番号です：置換可能性を示さなければならず、オンチェーンのフィンガープリンティングを避けるために実装間で同じ値を使用するべきです。
+`sequence` はこの入力のシーケンス番号です。置換可能性 (replaceability) を示す値でなければならず、オンチェーンでのフィンガープリンティングを避けるために実装間で同じ値を使うべきです。
 
 #### 流動性グリーフィング
 
@@ -321,11 +336,18 @@ A が 2 番目のインプットを送信しない場合、交渉は B の貢献
     * [`sha256`:`txid`]
     * [`u16`:`num_witnesses`]
     * [`num_witnesses*witness`:`witnesses`]
+    * [`tx_signatures_tlvs`:`tlvs`]
 
 1. subtype: `witness`
 2. data:
     * [`u16`:`len`]
     * [`len*byte`:`witness_data`]
+
+1. `tlv_stream`: `tx_signatures_tlvs`
+2. types:
+   1. type: 0 (`shared_input_signature`)
+   2. data:
+     * [`signature`:`signature`]
 
 #### 要件
 
@@ -375,30 +397,32 @@ A が 2 番目のインプットを送信しない場合、交渉は B の貢献
 
 #### 要件
 
-送信者：
-  - `feerate` を以前に構築されたトランザクションの `feerate` の 25/24 倍以上に設定しなければなりません（切り捨て）。
-  - トランザクションのファンディング出力に寄与する場合：
+送信者:
+  - `feerate` を、以前に構築されたトランザクションの `feerate` の 25/24 倍以上 (端数切り捨て) に設定しなければなりません。
+  - トランザクションの資金調達出力に寄与する場合:
     - `funding_output_contribution` を設定しなければなりません。
-  - 受信ノードに確認済みのインプットのみを使用することを要求する場合：
+  - 受信ノードに確認済みの入力のみの使用を要求する場合:
     - `require_confirmed_inputs` を設定しなければなりません。
+  - 以前のトランザクションに寄与していた場合:
+    - 各以前のトランザクション構築試行から少なくとも 1 つの入力を `tx_add_input` で送信し、新しいトランザクションが他のすべての試行を二重支出することを保証しなければなりません。
 
-受信者：
-  - `tx_abort` または `tx_ack_rbf` で応答しなければなりません。
-  - 以下の場合、`tx_abort` で応答しなければなりません：
-    - `feerate` が最後に成功したトランザクションの `feerate` の 25/24 倍以上でない場合
-  - 任意の理由で `tx_abort` を送信してもかまいません。
-  - 以下の場合、交渉を失敗させなければなりません：
-    - `require_confirmed_inputs` が設定されているが、確認済みのインプットを提供できない場合
+受信者:
+  - `tx_abort` または `tx_ack_rbf` のいずれかで応答しなければなりません。
+  - 以下の場合は `tx_abort` で応答しなければなりません:
+    - `feerate` が、最後に正常に構築されたトランザクションの `feerate` の 25/24 倍以上でない場合。
+  - 任意の理由で `tx_abort` を送信してよいです。
+  - 以下の場合、交渉を失敗させなければなりません:
+    - `require_confirmed_inputs` が設定されているにもかかわらず、確認済みの入力を提供できない場合。
 
-#### 理論的根拠
+#### 根拠
 
-`feerate` はこのトランザクションが支払う手数料率です。最後に使用された `feerate` よりも少なくとも 1/24 高くなければならず、進捗を確保するために最も近いサトシに切り捨てられます。
+`feerate` はこのトランザクションが支払う手数料率です。前回使用した `feerate` より少なくとも 1/24 高くなければならず、進捗を保証するためにサトシ単位に切り捨てられます。
 
-例えば、最後の `feerate` が 520 だった場合、次に送信される `feerate` は 541 でなければなりません（520 * 25 / 24 = 541.667、切り捨てて 541）。
+例えば、前回の `feerate` が 520 であれば、次に送る `feerate` は 541 でなければなりません (520 * 25 / 24 = 541.667 → 切り捨てで 541)。
 
-RBF 試行の途中で以前のトランザクションが確認された場合、その試行は放棄しなければなりません。
+RBF の試行中に以前のトランザクションが確認された場合、その RBF 試行は放棄しなければなりません。
 
-`funding_output_contribution` は、このピアがトランザクションのファンディング出力に寄与するサトシの量です。この出力がある場合に限ります。以前に完了したトランザクションでの寄与とは異なる場合があります。省略された場合、送信者はファンディング出力に寄与していません。
+`funding_output_contribution` は、資金調達出力が存在する場合に、このピアがその出力に寄与するサトシ量です。以前に完了したトランザクションでの寄与額と異なっていてもかまいません。省略された場合、送信者は資金調達出力に寄与しないことを意味します。
 
 ### `tx_ack_rbf` メッセージ
 
@@ -416,16 +440,18 @@ RBF 試行の途中で以前のトランザクションが確認された場合�
 
 #### 要件
 
-送信者：
-  - トランザクションの資金出力に寄与する場合：
-    - `funding_output_contribution` を設定しなければなりません
-  - 受信ノードが確認済みのインプットのみを使用することを要求する場合：
-    - `require_confirmed_inputs` を設定しなければなりません
+送信者:
+  - トランザクションの資金調達出力に寄与する場合:
+    - `funding_output_contribution` を設定しなければなりません。
+  - 受信ノードに確認済みの入力のみの使用を要求する場合:
+    - `require_confirmed_inputs` を設定しなければなりません。
+  - 以前のトランザクションに寄与していた場合:
+    - 各以前のトランザクション構築試行から少なくとも 1 つの入力を `tx_add_input` で送信し、新しいトランザクションが他のすべての試行を二重支出することを保証しなければなりません。
 
-受信者：
-  - `tx_abort` または `tx_add_input` メッセージで応答し、インタラクティブなトランザクション協力プロトコルを再開しなければなりません。
-  - 交渉を失敗させなければなりません、もし：
-    - `require_confirmed_inputs` が設定されているが、確認済みのインプットを提供できない場合
+受信者:
+  - `tx_abort` または `tx_add_input` のいずれかで応答し、interactive-tx の協調プロトコルを再開しなければなりません。
+  - 以下の場合、交渉を失敗させなければなりません:
+    - `require_confirmed_inputs` が設定されているにもかかわらず、確認済みの入力を提供できない場合。
 
 #### 理論的根拠
 
@@ -452,7 +478,7 @@ RBF 試行の途中で以前のトランザクションが確認された場合�
 
 受信ノード：
   - すでにピアに `tx_signatures` を送信している場合：
-    - 交渉されたトランザクションのインプットが消費されるまで、チャネルを忘れてはなりません。
+    - 交渉されたトランザクションの入力が消費されるまで、チャネルを忘れてはなりません。
   - `tx_signatures` を送信していない場合：
     - 現在の交渉を忘れ、状態をリセットするべきです。
   - `tx_abort` を送信していない場合：
@@ -478,7 +504,6 @@ RBF 試行の途中で以前のトランザクションが確認された場合�
 
 チャネルファンダーが `funding_signed` メッセージを受け取ると、ビットコインネットワークに資金提供トランザクションをブロードキャストしなければなりません。`funding_signed` メッセージが送信/受信された後、両側は資金提供トランザクションがブロックチェーンに入り、指定された深さ（確認数）に達するのを待つべきです。両側が `channel_ready` メッセージを送信した後、チャネルは確立され、通常の操作を開始できます。`channel_ready` メッセージには、チャネル認証証明を構築するために使用される情報が含まれています。
 
-```
         +-------+                              +-------+
         |       |--(1)---  open_channel  ----->|       |
         |       |<-(2)--  accept_channel  -----|       |
@@ -530,7 +555,6 @@ RBF 試行の途中で以前のトランザクションが確認された場合�
     1. タイプ: 1 (`channel_type`)
     2. データ:
         * [`...*byte`:`type`]
-```
 
 `chain_hash` の値は、開かれるチャネルがどのブロックチェーンに属するかを示します。これは通常、該当するブロックチェーンのジェネシスハッシュです。`chain_hash` の存在により、ノードは複数の異なるブロックチェーンにわたってチャネルを開くことができ、同じピアに対して複数のブロックチェーン内にチャネルを開くことも可能です（対象のチェーンをサポートしている場合）。
 
@@ -587,16 +611,14 @@ RBF 試行の途中で以前のトランザクションが確認された場合�
     - `shutdown` `scriptpubkey` によって要求される有効な `shutdown_scriptpubkey` またはゼロ長の `shutdown_scriptpubkey` (つまり `0x0000`) のいずれかを持つ `upfront_shutdown_script` を含めなければなりません。
   - それ以外の場合：
     - `upfront_shutdown_script` を含めてもよいです。
-  - `open_channel_tlvs` を含める場合：
+  - `open_channel_tlvs` を含める場合:
     - `upfront_shutdown_script` を含めなければなりません。
-  - `option_channel_type` が交渉された場合：
-    - `channel_type` を設定しなければなりません。
-  - `channel_type` を含める場合：
-    - 希望するタイプを表す定義されたタイプに設定しなければなりません。
-    - チャネルタイプを表すために可能な限り小さいビットマップを使用しなければなりません。
-    - 交渉されていない機能を含むタイプに設定してはなりません。
-    - `announce_channel` が `true` (つまり `0` ではない) の場合：
-      - `option_scid_alias` ビットが設定された `channel_type` を送信してはなりません。
+    - `channel_type` を設定しなければなりません:
+      - 希望するタイプを表す定義済みのタイプに設定しなければなりません。
+      - チャネルタイプを表すには、可能な限り小さいビットマップを使用しなければなりません。
+      - 交渉されていない機能を含むタイプを設定すべきではありません。
+      - `announce_channel` が `true` (`0` 以外) の場合:
+        - `option_scid_alias` ビットが立った `channel_type` を送信してはなりません。
 
 送信ノードは以下を行う「べき」です (SHOULD)：
   - 受信者の不正行為があった場合に、送信者がコミットメントトランザクションの出力を不可逆的に使用できるようにするために、`to_self_delay` を十分に設定します。
@@ -604,17 +626,18 @@ RBF 試行の途中で以前のトランザクションが確認された場合�
   - コミットメントトランザクションが Bitcoin ネットワークを通じて伝播できるように、`dust_limit_satoshis` を十分な値に設定します。
   - このピアから受け入れる最小値 HTLC に `htlc_minimum_msat` を設定します。
 
-受信ノードは以下を行わなければなりません (MUST)：
+受信ノードは以下を行わなければなりません (MUST):
   - `channel_flags` の未定義ビットを無視します。
-  - 前の `open_channel` を受信した後、`funding_created` メッセージを受信する前に接続が再確立された場合：
+  - メッセージに `channel_type` が含まれていない場合:
+    - チャネルを失敗させます。
+  - 直前の `open_channel` を受信した後、`funding_created` メッセージを受信する前に接続が再確立された場合:
     - 新しい `open_channel` メッセージを受け入れます。
-    - 前の `open_channel` メッセージを破棄します。
-  - `option_dual_fund` が交渉された場合：
+    - 直前の `open_channel` メッセージを破棄します。
+  - `option_dual_fund` が交渉されている場合:
     - チャネルを失敗させます。
 
-受信ノードは以下の場合にチャネルを失敗させる「かもしれません」(MAY)：
-  - `option_channel_type` が交渉されたが、メッセージに `channel_type` が含まれていない。
-  - `announce_channel` が `false` ( `0` ) であるが、チャネルを公に発表したい。
+受信ノードは以下の場合にチャネルを失敗させてもよい (MAY):
+  - `announce_channel` が `false` (`0`) なのに、チャネルを公に告知したい場合。
   - `funding_satoshis` が小さすぎる。
   - `htlc_minimum_msat` が大きすぎると考える。
   - `max_htlc_value_in_flight_msat` が小さすぎると考える。
@@ -655,7 +678,7 @@ RBF 試行の途中で以前のトランザクションが確認された場合�
 
 `channel_reserve_satoshis` が `dust_limit_satoshis` に従ってダストと見なされないという要件は、すべての出力がダストとして排除されるケースを排除します。`accept_channel` における類似の要件は、両側の `channel_reserve_satoshis` が `dust_limit_satoshis` を上回ることを保証します。
 
-受信者は大きな `dust_limit_satoshis` を受け入れるべきではありません。これは、ピアが多くのダスト HTLC を含むコミットメントを公開し、それが実質的にマイナー手数料となるグリーフィング攻撃に利用される可能性があるためです。
+受信者は大きな `dust_limit_satoshis` を受け入れるべきではありません。これは、ピアが多くのダスト HTLC を含むコミットメントを公開し、それが実質的にマイナー手数料に化けるグリーフィング攻撃に悪用される可能性があるためです。一方で、HTLC 出力は現在のオンチェーン手数料率に見合う第 2 段階トランザクションで使用される必要があるため、Bitcoin Core の標準ダストリミットより高い値も許容しなければなりません。
 
 チャネル障害の処理方法の詳細は [BOLT 5:Failing a Channel](05-onchain.md#failing-a-channel) に記載されています。
 
@@ -773,31 +796,22 @@ RBF 試行の途中で以前のトランザクションが確認された場合�
 #### 要件
 
 両方のピア:
-  - `channel_type` が `open_channel` と `accept_channel` の両方に存在する場合:
-    - これは `channel_type` です (上記で必要とされるように等しい必要があります)
-  - そうでない場合:
-    - `option_anchors` が交渉された場合:
-      - `channel_type` は `option_anchors` と `option_static_remotekey` (ビット 22 と 12) です
-    - そうでない場合:
-      - `channel_type` は `option_static_remotekey` (ビット 12) です
-  - すべてのコミットメントトランザクションにその `channel_type` を使用しなければなりません。
+  - 交渉された `channel_type` をすべてのコミットメントトランザクションで使用しなければなりません。
 
 送信者は以下を設定しなければなりません:
-  - `funding_created` メッセージからの `funding_txid` と `funding_output_index` の排他的論理和による `channel_id`。
-  - 初期コミットメントトランザクションのために、その `funding_pubkey` を使用して、[BOLT #3](03-transactions.md#commitment-transaction) で定義された有効な署名に `signature` を設定。
+  - `channel_id`: `funding_created` メッセージの `funding_txid` と `funding_output_index` の排他的論理和。
+  - `signature`: `funding_pubkey` を用いた、初期コミットメントトランザクションに対する有効な署名 ([BOLT #3](03-transactions.md#commitment-transaction) で定義)。
 
 受信者:
-  - `signature` が間違っているか、LOW-S 標準ルール<sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup>に準拠していない場合:
+  - `signature` が無効、または LOW-S 標準ルール<sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup>に準拠していない場合:
     - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
-  - 有効な `funding_signed` を受け取る前に資金調達トランザクションをブロードキャストしてはなりません。
+  - 有効な `funding_signed` を受け取る前に、資金調達トランザクションをブロードキャストしてはなりません。
   - 有効な `funding_signed` を受け取った場合:
-    - 資金調達トランザクションをブロードキャストすることを推奨します。
+    - 資金調達トランザクションをブロードキャストすべきです。
 
 #### 根拠
 
-`option_static_remotekey` または `option_anchors` は、コミットメントトランザクションを初めて生成する際に決定します。現在の接続のために `init` メッセージ交換で伝達されたフィーチャービットが、チャネルの全期間にわたるチャネルコミットメント形式を決定します。後の再接続でこのパラメータが交渉されなくても、このチャネルは `option_static_remotekey` または `option_anchors` を使い続けます。ダウングレードはサポートしていません。
-
-`option_anchors` は `option_static_remotekey` よりも優れていると考えられ、複数が交渉された場合は優れた方が優先されます。
+ここで `open_channel` と `accept_channel` で伝えられた `channel_type` を用いてコミットメントトランザクションを生成します。この `channel_type` がチャネル全期間にわたるコミットメント形式を決定します。
 
 ### `channel_ready` メッセージ
 
@@ -868,7 +882,7 @@ fundee がチャネルが確認される前に忘れてしまった場合、fund
 ## チャネル確立 v2
 
 これはチャネル確立プロトコルの改訂版です。
-このプロトコルは、`accept_channel2` ピア (受け入れ側/非イニシエータ) がインタラクティブなトランザクション構築プロトコルを通じて資金提供トランザクションに入力を提供できるように、以前のプロトコルを変更します。
+このプロトコルは、`accept_channel2` ピア (アクセプター/非イニシエータ) が interactive-tx 構築プロトコルを通じて資金調達トランザクションに入力を提供できるように、従来のプロトコルを変更したものです。
 
 
         +-------+                              +-------+
@@ -943,21 +957,23 @@ fundee がチャネルが確認される前に忘れてしまった場合、fund
 
 #### 要件
 
-ノードが `option_dual_fund` を交渉した場合：
-  - 開始ノード：
-    - `open_channel` を送信してはなりません
+ノードが `option_dual_fund` を交渉している場合:
+  - opener ノード:
+    - `open_channel` を送信してはなりません。
 
-送信ノード：
-  - `funding_feerate_perkw` をこのトランザクションの手数料率に設定しなければなりません
-  - 受信ノードに確認済みのインプットのみを使用することを要求する場合：
-    - `require_confirmed_inputs` を設定しなければなりません
+送信ノード:
+  - `channel_type` を設定しなければなりません。
+  - `funding_feerate_perkw` をこのトランザクションの手数料率に設定しなければなりません。
+  - 受信ノードに確認済みの入力のみの使用を要求する場合:
+    - `require_confirmed_inputs` を設定しなければなりません。
 
-受信ノード：
-  - 交渉を失敗させてもよい場合：
-    - `locktime` が受け入れられない
-    - `funding_feerate_perkw` が受け入れられない
-  - 交渉を失敗させなければならない場合：
-    - `require_confirmed_inputs` が設定されているが、確認済みのインプットを提供できない
+受信ノード:
+  - 以下の場合、交渉を失敗させてもよい (MAY):
+    - `locktime` が受け入れられない値である場合。
+    - `funding_feerate_perkw` が受け入れられない値である場合。
+  - 以下の場合、交渉を失敗させなければならない (MUST):
+    - `require_confirmed_inputs` が設定されているが、確認済みの入力を提供できない場合。
+    - `channel_type` が設定されていない場合。
 
 #### 根拠
 
@@ -975,7 +991,7 @@ fundee がチャネルが確認される前に忘れてしまった場合、fund
 
 `second_per_commitment_point` は、実装の便宜のためにここ（および `channel_ready` で）送信されます。
 
-送信ノードは、他の参加者が確認済みのインプットのみを使用するよう要求することがあります。これにより、送信ノードが他の参加者のインプットの未確認の低い手数料率の祖先の手数料を支払うことがないようにします。
+送信ノードは、他の参加者が確認済みの入力のみを使用するよう要求することがあります。これにより、送信ノードが他の参加者の入力の未確認の低い手数料率の祖先の手数料を支払うことがないようにします。
 
 ### `accept_channel2` メッセージ
 
@@ -1014,15 +1030,17 @@ fundee がチャネルが確認される前に忘れてしまった場合、fund
 
 #### 要件
 
-受け入れるノード:
+受諾するノード (acceptor):
   - `open_channel2` メッセージの `temporary_channel_id` を使用しなければなりません。
-  - `funding_satoshis` の値をゼロで応答してもかまいません。
-  - 開始ノードに確認済みのインプットのみを使用するよう要求する場合:
+  - `channel_type` を `open_channel2` の `channel_type` に設定しなければなりません。
+  - `funding_satoshis` をゼロで応答してもよいです。
+  - 開始ノード (opener) に確認済みの入力のみの使用を要求する場合:
     - `require_confirmed_inputs` を設定しなければなりません。
 
 受信ノード:
-  - 交渉を失敗させなければなりません:
-    - `require_confirmed_inputs` が設定されているが、確認済みのインプットを提供できない場合
+  - 以下のいずれかに該当する場合、交渉を失敗させなければなりません:
+    - `require_confirmed_inputs` が設定されているにもかかわらず、確認済みの入力を提供できない場合。
+    - `channel_type` が設定されていない場合。
 
 #### 理論
 
@@ -1032,7 +1050,7 @@ fundee がチャネルが確認される前に忘れてしまった場合、fund
 
 ### 資金構成
 
-チャネル確立 v2 の資金構成は、[インタラクティブトランザクション構築](#interactive-transaction-construction) プロトコルを利用し、以下の追加の注意点があります。
+チャネル確立 v2 の資金構成は、[interactive-tx によるトランザクション構築](#interactive-transaction-construction) プロトコルを利用しますが、以下の追加の注意点があります。
 
 #### `tx_add_input` メッセージ
 
@@ -1125,29 +1143,34 @@ fundee がチャネルが確認される前に忘れてしまった場合、fund
 
 ### 手数料の引き上げ：`tx_init_rbf` と `tx_ack_rbf`
 
-資金調達トランザクションがブロードキャストされた後、チャネルの確認を早めるために、より多くの手数料を支払うトランザクションに置き換えることができます。
+資金調達トランザクションがブロードキャストされた後は、チャネル確認を早めるために、より多くの手数料を支払うトランザクションに置き換えられます。
 
 #### 要件
 
-`tx_init_rbf` の送信者：
-  - *イニシエータ* でなければなりません。
-  - `channel_ready` メッセージを送信または受信してはなりません。
+`tx_init_rbf` の送信者:
+  - *イニシエータ* または *アクセプター* のいずれでもよい。
+    - 送信者がアクセプターの場合、`interactive-tx` セッションのイニシエータとなります。したがって:
+      - チャネル出力の `tx_add_output` を送信しなければなりません。
+      - 共通フィールドの手数料を支払わなければなりません。
+  - `channel_ready` メッセージを送信または受信していてはなりません。
 
-受信者：
+受信者:
   - すでに `channel_ready` を送信または受信している場合、交渉を失敗させなければなりません。
   - 任意の理由で交渉を失敗させてもかまいません。
 
-#### 理論的根拠
+#### 根拠
 
-RBF 試行の途中で有効な `channel_ready` メッセージを受信した場合、その試行は放棄されなければなりません。
+RBF 試行の途中で有効な `channel_ready` メッセージが受信された場合、その試行は放棄しなければなりません。
 
-ピアは、`tx_init_rbf.funding_output_contribution` と `tx_ack_rbf.funding_output_contribution` において、`open_channel2` および `accept_channel2` で送信された金額とは異なる値を使用できます。資金調達出力にどれだけコミットしたいかを変更することが許可されています。
+ピアは `tx_init_rbf.funding_output_contribution` および `tx_ack_rbf.funding_output_contribution` に、`open_channel2` や `accept_channel2`、または以前の RBF 試行で送った金額と異なる値を設定できます。資金調達出力へのコミット量を変更してよいということです。
 
-ピアは、大きな手数料率の変化により RBF 交渉を失敗させるのではなく、`sats` をゼロに設定し、チャネル資金調達へのさらなる参加を辞退することが推奨されます。貢献しないことで、無償で受信流動性を得ることができるかもしれません。
+ピアは、大きな手数料率変化により RBF 交渉を失敗させるよりも、`sats` をゼロに設定してチャネル資金調達への参加を辞退するほうが推奨されます。寄与しないことで、無償で受信流動性を得られる可能性があるためです。
 
-## チャネルの静止化
+両ノードのいずれも RBF を開始できるようにしているのは、最初の資金調達トランザクションの確認を待たずに、追加資金をチャネルに投入したいと考えるかもしれないためです。
 
-さまざまな基本的な変更、特にプロトコルのアップグレードは、両方のコミットメントトランザクションが一致し、保留中の更新がないチャネルで最も簡単に行えます。「何か基本的なことが進行中である」ことを示すことでチャネルを静止化するプロトコルを定義します。
+## チャネルのクワイエセンス
+
+各種の基本的な変更、特にプロトコルアップグレードは、両ピアのコミットメントトランザクションが一致しており、保留中の更新もないチャネル上で行うのが最も簡単です。本仕様では「基本的な何かが進行中である」と示すことでチャネルを静止化 (クワイエセンス) するプロトコルを定義します。
 
 ### `stfu`
 
@@ -1158,69 +1181,461 @@ RBF 試行の途中で有効な `channel_ready` メッセージを受信した�
 
 ### 要件
 
-`stfu` の送信者：
+`stfu` の送信者:
 
 - `option_quiesce` が交渉されていない限り、`stfu` を送信してはなりません。
-- 送信者の htlc 追加、htlc 削除、または手数料の更新がどちらのピアでも保留中の場合、`stfu` を送信してはなりません。
-- `stfu` を二度送信してはなりません。
-- `stfu` に返信している場合：
+- 送信者の HTLC 追加・削除、または手数料更新がいずれかのピアで保留中の場合、`stfu` を送信してはなりません。
+- `stfu` を 2 回送信してはなりません。
+- `stfu` への返信である場合:
   - `initiator` を 0 に設定しなければなりません。
-- それ以外の場合：
+- それ以外の場合:
   - `initiator` を 1 に設定しなければなりません。
-- `channel_id` を静止させるチャネルの ID に設定しなければなりません。
-- チャネルが静止状態であると見なさなければなりません。
-- `stfu` の後に更新メッセージを送信してはなりません。
+- `channel_id` を、クワイエセンスさせるチャネルの ID に設定しなければなりません。
+- 以後、チャネルはクワイエセンス中であると見なさなければなりません。
+- `stfu` のあとに更新メッセージを送信してはなりません。
 
-`stfu` の受信者：
+`stfu` の受信者:
 
-- `stfu` を送信した場合：
-  - チャネルが静止状態であると見なさなければなりません。
-- それ以外の場合：
-  - これ以上更新メッセージを送信すべきではありません。
+- すでに `stfu` を送信していた場合:
+  - 以後、チャネルはクワイエセンスであると見なさなければなりません。
+- そうでない場合:
+  - これ以上の更新メッセージを送るべきではありません。
   - 可能になったら `stfu` で返信しなければなりません。
 
-両方のノード：
+両方のノード:
 
-- HTLC が保留中の場合、静止状態から 60 秒後に切断しなければなりません。
+- HTLC が保留中の場合、クワイエセンス状態が 60 秒続いた時点で切断しなければなりません。
 
-切断時：
+切断時:
 
-- チャネルはもはや静止状態と見なされません。
+- チャネルはもはやクワイエセンス状態とは見なされません。
 
-依存プロトコル：
+依存プロトコル:
 
-- 静止状態を終了させるすべての状態を指定しなければなりません。
-  - 注記：これは静止状態に依存するプロトコルのバッチ実行を防ぎます。
+- クワイエセンスを終了させるすべての状態を指定しなければなりません。
+  - 注: これにより、クワイエセンスに依存する複数のプロトコルをまとめて実行することはできなくなります。
 
-### 理論的根拠
+### 根拠
 
-通常の使用法は、更新の送信を停止し、現在のすべての更新が両方のピアによって確認されるのを待ってから、静止状態を開始することです。いくつかのプロトコルでは、イニシエータを選ぶことが重要なので、このフラグが送信されます。
+通常の利用法は、更新の送信を止めて、現在のすべての更新が両ピアで確認済みになるのを待ってから、クワイエセンスを開始することです。プロトコルによってはイニシエータを選ぶことが重要なので、そのためにこのフラグが送られます。
 
-両側が同時に `stfu` を送信した場合、両方とも `initiator` を `1` に設定します。この場合、「イニシエータ」は任意にチャネルの資金提供者（`open_channel` の送信者）と見なされます。静止状態の効果は、一方が他方に返信した場合とまったく同じです。
+両側が同時に `stfu` を送信した場合、双方とも `initiator` を `1` に設定します。その場合、「イニシエータ」は任意にチャネルのファンダー (`open_channel` の送信者) として扱います。クワイエセンスの効果は、一方が他方に返信した場合とまったく同じです。
 
-依存プロトコルは、チャネルのトラフィックを再開するために切断が必要になるのを防ぐために、終了条件を指定しなければなりません。明示的な再開メッセージは、[検討されましたが却下されました](https://github.com/rustyrussell/lightning-rfc/pull/14)。これは、チャネル状態の双方向の合意を維持するのが著しく複雑になる多くのエッジケースを導入するためです。これにより、同じ静止セッションで複数の下流プロトコルをバッチ処理することが不可能であるという派生的な特性が導入されます。
+依存プロトコルは、チャネルトラフィックを再開するために切断が必要になることを避けるため、終了条件を指定しなければなりません。明示的な再開メッセージは [検討されたものの却下されました](https://github.com/rustyrussell/lightning-rfc/pull/14)。チャネル状態の双方向の合意を維持するのが著しく複雑になるエッジケースが多いためです。その派生的な性質として、同じクワイエセンスセッション内で複数の下流プロトコルをまとめて実行することはできなくなります。
+
+## チャネルスプライシング
+
+スプライシングとは、資金調達トランザクションを新しいものに置き換える操作の総称です。簡略化のため、スプライシングはチャネルが [クワイエセンス](#channel-quiescence) 状態にある間に行われます。
+
+スプライストランザクションが署名されると (どれかが確認されるのを待つ間)、チャネルは通常運用に戻ります。この時点でチャネルはクワイエセンス状態ではなくなります。
+
+両側が `splice_locked` を送信し、いずれかのスプライストランザクションが許容できる深さに達したことが示されると、最終的にスプライスが終了します。
+
+        +-------+                               +-------+
+        |       |--- splice_init -------------->|       |
+        |   A   |<--------------- splice_ack ---|   B   |
+        |       |                               |       |
+        |       |--- tx_add_input ------------->|       |
+        |       |<------------- tx_add_input ---|       |
+        |       |--- tx_add_input ------------->|       |
+        |       |<------------ tx_add_output ---|       |
+        |       |--- tx_add_output ------------>|       |
+        |       |<-------------- tx_complete ---|       |
+        |       |--- tx_add_output ------------>|       |
+        |       |<-------------- tx_complete ---|       |
+        |       |--- tx_complete -------------->|       |
+        |       |                               |       |
+        |       |--- commit_sig --------------->|       |
+        |       |<--------------- commit_sig ---|       |
+        |       |--- tx_signatures ------------>|       |
+        |       |<------------ tx_signatures ---|       |
+        |       |                               |       |
+        |       |       <RESUME CHANNEL>        |       |
+        |       |                               |       |
+        |       |--- update_add_htlc ---------->|       |
+        |       |--- commit_sig --------------->|       |
+        |       |--- commit_sig --------------->|       |
+        |       |<----------- revoke_and_ack ---|       |
+        |       |<--------------- commit_sig ---|       |
+        |       |<--------------- commit_sig ---|       |
+        |       |--- revoke_and_ack ----------->|       |
+        |       |                               |       |
+        |       |             <RBF>             |       |
+        |       |                               |       |
+        |       |<-------------- tx_init_rbf ---|       |
+        |       |--- tx_ack_rbf --------------->|       |
+        |       |<------------- tx_add_input ---|       |
+        |       |--- tx_add_input ------------->|       |
+        |       |<------------- tx_add_input ---|       |
+        |       |--- tx_add_output ------------>|       |
+        |       |<------------ tx_add_output ---|       |
+        |       |--- tx_complete -------------->|       |
+        |       |<------------ tx_add_output ---|       |
+        |       |--- tx_complete -------------->|       |
+        |       |<-------------- tx_complete ---|       |
+        |       |                               |       |
+        |       |<--------------- commit_sig ---|       |
+        |       |--- commit_sig --------------->|       |
+        |       |--- tx_signatures ------------>|       |
+        |       |<------------ tx_signatures ---|       |
+        |       |                               |       |
+        |       |       <RESUME CHANNEL>        |       |
+        |       |                               |       |
+        |       |--- update_add_htlc ---------->|       |
+        |       |--- commit_sig --------------->|       |
+        |       |--- commit_sig --------------->|       |
+        |       |--- commit_sig --------------->|       |
+        |       |<----------- revoke_and_ack ---|       |
+        |       |<--------------- commit_sig ---|       |
+        |       |<--------------- commit_sig ---|       |
+        |       |<--------------- commit_sig ---|       |
+        |       |--- revoke_and_ack ----------->|       |
+        |       |                               |       |
+        |       |      <SPLICE COMPLETION>      |       |
+        |       |                               |       |
+        |       |--- splice_locked ------------>|       |
+        |       |<------------ splice_locked ---|       |
+        |       |                               |       |
+        |       |       <RESUME CHANNEL>        |       |
+        |       |                               |       |
+        |       |--- update_add_htlc ---------->|       |
+        |       |--- commit_sig --------------->|       |
+        |       |<----------- revoke_and_ack ---|       |
+        |       |<--------------- commit_sig ---|       |
+        |       |--- revoke_and_ack ----------->|       |
+        |       |                               |       |
+        +-------+                               +-------+
+
+### `splice_init` メッセージ
+
+1. type: 80 (`splice_init`)
+2. data:
+    * [`channel_id`:`channel_id`]
+    * [`s64`:`funding_contribution_satoshis`]
+    * [`u32`:`funding_feerate_perkw`]
+    * [`u32`:`locktime`]
+    * [`point`:`funding_pubkey`]
+    * [`splice_init_tlvs`:`tlvs`]
+
+1. `tlv_stream`: `splice_init_tlvs`
+2. types:
+   1. type: 2 (`require_confirmed_inputs`)
+
+`funding_contribution_satoshis` は、送信者が自身のチャネル残高に追加する金額 (splice-in) または減算する金額 (splice-out) を表します。
+
+#### 要件
+
+送信ノード:
+  - チャネルがクワイエセンス状態でない場合、`splice_init` を送信してはなりません。
+  - クワイエセンスのイニシエータでない場合、`splice_init` を送信してはなりません。
+  - `channel_ready` の送受信が完了するまで、`splice_init` を送信してはなりません。
+  - 別のスプライス交渉が進行中の場合、`splice_init` を送信してはなりません。
+  - 別のスプライスが交渉済みでも `splice_locked` の送受信が完了していない場合、`splice_init` を送信してはなりません。
+  - すでに `shutdown` を送信済みの場合、`splice_init` を送信してはなりません。
+  - `funding_feerate_perkw` をスプライストランザクションの手数料率に設定しなければなりません。
+  - チャネルから資金を引き出す (splice-out) 場合:
+    - `funding_contribution_satoshis` を、現在のチャネル残高から減らす量に等しい負の値に設定しなければなりません。
+  - チャネルに資金を追加する (splice-in) 場合:
+    - `funding_contribution_satoshis` を、現在のチャネル残高に加える量に等しい正の値に設定しなければなりません。
+  - 受信ノードに確認済みの入力のみの使用を要求する場合:
+    - `require_confirmed_inputs` を設定しなければなりません。
+  - 以前の資金調達トランザクションで使用したものとは異なる `funding_pubkey` を使用すべきです。
+
+受信ノード:
+  - チャネルがクワイエセンス状態でない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 送信ノードがクワイエセンスのイニシエータでない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 別のスプライスがすでに交渉中の場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 別のスプライスが交渉済みでも、まだロックされていない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - すでに `shutdown` を受信している場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - `funding_feerate_perkw` が受け入れられない場合:
+    - `tx_abort` で応答しなければなりません。
+  - `funding_contribution_satoshis` が負の値で、その絶対値が送信ノードの現在のチャネル残高を超えている場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - スプライス試行を受け入れる場合:
+    - `splice_ack` で応答しなければなりません。
+  - そうでない (スプライスを拒否する) 場合:
+    - `tx_abort` で応答しなければなりません。
+
+### `splice_ack` メッセージ
+
+1. type: 81 (`splice_ack`)
+2. data:
+    * [`channel_id`:`channel_id`]
+    * [`s64`:`funding_contribution_satoshis`]
+    * [`point`:`funding_pubkey`]
+    * [`splice_ack_tlvs`:`tlvs`]
+
+1. `tlv_stream`: `splice_ack_tlvs`
+2. types:
+   1. type: 2 (`require_confirmed_inputs`)
+
+#### 要件
+
+送信ノード:
+  - 以前の資金調達トランザクションで使用したものとは異なる `funding_pubkey` を使用すべきです。
+  - スプライスに寄与したくない場合、`funding_contribution_satoshis` を `0` に設定してもよいです。
+  - 受信ノードに確認済みの入力のみの使用を要求する場合:
+    - `require_confirmed_inputs` を設定しなければなりません。
+
+受信ノード:
+  - `splice_init` を送信済みの場合:
+    - `funding_contribution_satoshis` が負の値で、その絶対値が送信ノードの現在のチャネル残高を超える場合:
+      - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+    - スプライス試行を受け入れる場合:
+      - スプライストランザクションを作成するため、`interactive-tx` セッションを開始しなければなりません。
+    - そうでない場合:
+      - `tx_abort` を送信してスプライス試行を拒否しなければなりません。
+  - そうでない (`splice_init` を送信していない) 場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+
+### スプライストランザクションの構築
+
+スプライストランザクションは [interactive-tx によるトランザクション構築](#interactive-transaction-construction) プロトコルを用いて作成しますが、以下の追加要件があります。
+
+#### `tx_add_input` メッセージ
+
+##### 要件
+
+送信ノード:
+  - スプライスのイニシエータの場合:
+    - `tx_add_input` を、`shared_input_txid` に直前の資金調達トランザクションの `txid` を入れて送信し、現在のチャネル入力をスプライストランザクションに追加しなければなりません。
+      - その共有入力に対しては `prevtx` を含めてはなりません。
+      - `prevtx_vout` を、直前の資金調達出力のインデックスに設定しなければなりません。
+  - 受信ノードが `splice_init`、`splice_ack`、`tx_init_rbf`、`tx_ack_rbf` のいずれかで `require_confirmed_inputs` を設定している場合:
+    - 未確認入力を含む `tx_add_input` を送信してはなりません。
+
+受信ノード:
+  - `shared_input_txid` が設定されている場合:
+    - 直前の資金調達トランザクションの `txid` と一致しない場合:
+      - `tx_abort` で交渉を失敗させなければなりません。
+    - `prevtx_vout` が直前の資金調達出力のインデックスと一致しない場合:
+      - `tx_abort` で交渉を失敗させなければなりません。
+
+##### 根拠
+
+スプライストランザクションは、現在のチャネル資金調達出力を必ず消費します。スプライスのイニシエータがその入力をトランザクションに追加し、その重み分の手数料を支払います。直前の資金調達トランザクション全体を `prevtx` で送るのは無駄であり、65kB を超える資金調達トランザクションでは送信することすらできません。そのため `shared_input_txid` を使って `txid` のみを伝えます。
+
+#### `tx_add_output` メッセージ
+
+##### 要件
+
+送信ノード:
+  - スプライスのイニシエータの場合:
+    - `splice_init` および `splice_ack` の `funding_pubkey` を用いた、新しいチャネルの資金調達出力を含む `tx_add_output` を、少なくとも 1 つ送信しなければなりません。
+      - その `tx_add_output` の金額は、以前のチャネル容量に `splice_init` および `splice_ack` の `funding_contribution_satoshis` を反映した値に設定しなければなりません。
+
+##### 根拠
+
+スプライスのイニシエータが、新しいチャネル資金調達出力を追加し、その重み分の手数料を支払います。
+
+#### `tx_complete` メッセージ
+
+##### 要件
+
+受信ノード:
+  - 各側のチャネル残高は、それぞれの `funding_contribution_satoshis` を以前のチャネル残高に加算して計算しなければなりません。
+  - 以下のいずれかに該当する場合、`tx_abort` で交渉を失敗させなければなりません:
+    - 現在の資金調達トランザクションを消費する入力が、ちょうど 1 つ存在しない場合。
+    - `splice_init` および `splice_ack` の資金調達公開鍵と寄与額を用いたチャネル資金調達出力が、ちょうど 1 つ存在しない場合。
+    - これが RBF 試行で、トランザクションの合計手数料が、最後に正常に交渉されたスプライストランザクションの手数料より少ない場合。
+    - いずれかの側がチャネル資金調達出力以外の出力を追加しており、その側の残高が、新しいチャネル容量に対応するチャネルリザーブを下回る場合。
+
+##### 根拠
+
+ある側がリザーブ要件を満たさないこと自体は問題ありませんが、その側がチャネルから資金を引き出す場合は、リザーブを満たさなければなりません。ピアが多額の資金をチャネルに追加してきても、こちらがスプライスに寄与する意思がない限り、リザーブを増やす必要はありません (もし途中でこの状況になった場合、`tx_remove_output` や `tx_remove_input` を使えます)。
+
+#### `commitment_signed` メッセージ
+
+`tx_complete` を交換した後、両ピアは `commitment_signed` を送信し、新しいチャネル資金調達出力を消費するコミットメントトランザクションを作成して、スプライストランザクションにコミットします。
+
+通常の [`commitment_signed`](#committing-updates-so-far-commitment_signed) の要件に加えて、次のものが適用されます。
+
+##### 要件
+
+送信ノード:
+  - スプライス資金調達出力を消費するコミットメントトランザクションを作成し、以下を満たさなければなりません:
+    - `splice_init` および `splice_ack` の `funding_contribution_satoshis` を、それぞれの送信者のメイン残高に加算する。
+    - 既存のコミットメントトランザクションと同じ手数料率を使用する。
+    - 既存のコミットメントトランザクションと同じ `commitment_number` を使用する。
+  - 保留中の HTLC 用の署名を送信しなければなりません。
+  - このスプライストランザクションの詳細を記憶しておかなければなりません。
+
+受信ノード:
+  - `revoke_and_ack` で応答してはなりません。
+  - まだ自身の `commitment_signed` を送信していない場合:
+    - `commitment_signed` を送信しなければなりません。
+  - [`tx_signatures` の要件](#the-tx_signatures-message) に従って先に署名すべき場合:
+    - `tx_signatures` を送信しなければなりません。
+    - イニシエータが共有入力 (直前のチャネル出力に対応) の `tx_add_input` を送信するため、最初に `tx_signatures` を送るのは誰かを判定する際には、各ノードの過去残高ではなく、以前のチャネル容量の 100% がイニシエータに帰属するものとして扱う点に注意してください。
+
+再接続時:
+  - `next_funding` がスプライストランザクションと一致する場合:
+    - `commitment_signed` を再送信しなければなりません。
+
+##### 根拠
+
+ピアがコミットメント署名を交換できる状態に達したら、切断時に署名交換を再開できるよう、スプライストランザクションの詳細を記憶しておく必要があります。
+
+#### `tx_signatures` メッセージ
+
+##### 要件
+
+送信ノード:
+  - `shared_input_signature` には、この入力に対応する `funding_pubkey` を用いて、直前のチャネル資金調達出力を消費する `tx_add_input` に対する有効な ECDSA 署名を設定しなければなりません。
+
+受信ノード:
+  - `shared_input_signature` が設定されていない場合:
+    - `error` を送信してチャネルを失敗させなければなりません。
+  - `shared_input_signature` が無効、または LOW-S 標準ルール<sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup>に準拠していない場合:
+    - `error` を送信してチャネルを失敗させなければなりません。
+  - チャネルはもはやクワイエセンスではないと見なさなければなりません。
+
+再接続時:
+  - `next_funding` がスプライストランザクションと一致する場合:
+    - `tx_signatures` を再送信しなければなりません。
+
+##### 根拠
+
+チャネル資金調達出力を消費するには両ピアの署名が必要です。各ピアが自分の署名を送信することで、追加メッセージなしに共有入力に対する有効な witness を構築できます。
+
+`tx_signatures` の交換が完了すれば、スプライストランザクションをブロードキャストできます。チャネルはクワイエセンスではなくなり、トランザクションの確認と `splice_locked` の交換を待つ間、通常運用を再開できます。
+
+#### `tx_init_rbf` メッセージ
+
+##### 要件
+
+送信ノード:
+  - チャネルがクワイエセンス状態でない場合、`tx_init_rbf` を送信してはなりません。
+  - クワイエセンスのイニシエータでない場合、`tx_init_rbf` を送信してはなりません。
+  - スプライスのイニシエータでなくても、`tx_init_rbf` を送信してよいです。
+  - 保留中の RBF 試行が 10 件を超えている場合:
+    - 迅速な確認を保証するために十分高い `feerate` を設定しなければなりません。
+  - すでに `splice_locked` を送信済みの場合、`tx_init_rbf` を送信してはなりません。
+  - `option_zeroconf` が交渉されている場合、`tx_init_rbf` を送信してはなりません。
+  - `funding_output_contribution` を、`splice_init`、`splice_ack`、または以前の RBF 試行で使った `funding_contribution_satoshis` と異なる値に設定してもよいです。
+
+受信ノード:
+  - チャネルがクワイエセンス状態でない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 送信ノードがクワイエセンスのイニシエータでない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 直近に別の RBF 試行が作られていた場合:
+    - `tx_abort` を送り、この RBF 試行を拒否し、以前の試行が確認されるのを待つべきです。
+  - 保留中の RBF 試行が 10 件を超えており、`feerate` が迅速な確認を保証するのに十分高くない場合:
+    - `tx_abort` を送り RBF 試行を拒否すべきです。
+  - 送信者が以前に `splice_locked` を送信していた場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - `option_zeroconf` が交渉されている場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - `funding_output_contribution` が負の値で、その絶対値が送信ノードの現在のチャネル残高を超える場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+
+##### 根拠
+
+スプライストランザクションは、メモリプールの手数料変動に応じて RBF できます。両ノードが RBF を開始できるようにしているのは、最初のスプライストランザクションの確認を待たずに、追加でチャネルへスプライスインまたはスプライスアウトしたい場合があるためです。
+
+保留中の RBF 試行数を制限しているのは、[`start_batch`](#batching-channel-messages) で定義された `batch_size` 上限に達するのを防ぐためです。多数の RBF 試行をすでに作っている場合は十分高い手数料率を要求し、また RBF 試行の間に間隔を空けて、以前の試行が確認される機会を与えます。
+
+スプライストランザクションは常に現在のチャネル資金調達出力を消費するため、RBF 試行同士は自動的に二重支出関係になります。`option_zeroconf` が交渉されている場合は資金喪失リスクがあるため、RBF を禁止しています。
+
+#### `tx_ack_rbf` メッセージ
+
+##### 要件
+
+送信ノード:
+  - `funding_output_contribution` を、`splice_init`、`splice_ack`、または以前の RBF 試行で使った `funding_contribution_satoshis` と異なる値に設定してもよいです。
+
+受信ノード:
+  - `funding_output_contribution` が負の値で、その絶対値が送信ノードの現在のチャネル残高を超える場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+
+### スプライスの完了
+
+スプライストランザクションが署名済みでも、まだ許容できる深さに達していない間は、チャネル運用は通常に戻り、HTLC を交換できます。ただし、支払いはすべてのスプライストランザクションについて妥当でなければなりません。
+
+ノードは複数のコミットメントトランザクション (現在の資金調達トランザクション用と各スプライストランザクション用) を追跡し、それぞれのコミットメントトランザクションに対する署名を交換します。
+
+```
++------------+        +-----------+
+| Funding Tx |---+--->| Commit Tx |
++------------+   |    +-----------+
+                 |    +-----------+            +-----------+
+                 +--->| Splice Tx |----------->| Commit Tx |
+                 |    +-----------+            +-----------+
+                 |    +---------------+        +-----------+
+                 +--->| Splice RBF #1 |------->| Commit Tx |
+                 |    +---------------+        +-----------+
+                 |    +---------------+        +-----------+
+                 +--->| Splice RBF #2 |------->| Commit Tx |
+                      +---------------+        +-----------+
+```
+
+スプライスは `splice_locked` メッセージの交換で完了し、その時点でロックされたトランザクションが直前の資金調達トランザクションを置き換えます。
+
+#### `splice_locked` メッセージ
+
+1. type: 77 (`splice_locked`)
+2. data:
+   * [`channel_id`:`channel_id`]
+   * [`sha256`:`splice_txid`]
+
+##### 要件
+
+各ノード:
+  - いずれかのスプライストランザクションが許容できる深さに達した場合:
+    - そのトランザクションの `txid` を入れた `splice_locked` を送信しなければなりません。
+  - `option_zeroconf` が交渉されている場合:
+    - `tx_signatures` の交換直後に `splice_locked` を送信すべきです。
+
+受信ノード:
+  - `splice_txid` が、保留中のいずれのスプライストランザクションとも一致しない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+
+`splice_locked` の送受信が完了した後:
+  - `splice_txid` が一致する場合:
+    - このスプライストランザクションの RBF 試行および祖先トランザクションについて、`commitment_signed` の送信を停止しなければなりません。
+    - RBF 試行および祖先トランザクションを破棄してもよいです。
+    - このチャネルの `announce_channel` が設定されている場合:
+      - このスプライストランザクションに対応する `short_channel_id` を含む `announcement_signatures` を送信しなければなりません。
+  - `splice_txid` が異なる RBF 候補を指している場合:
+    - メッセージを無視すべきです。
+    - `error` を送信してチャネルを失敗させてもよいです。
+
+##### 根拠
+
+ノード同士が異なるブロックチェーンのフォーク上にいる場合、どの RBF 試行が確認されたかについて見解が分かれることがあります。その場合、ノードはチャネルを閉じるか、`splice_locked` を無視して、いずれかのフォークがもう一方を置き換えるのを待てばよいです。最終的には両ノードが同じ RBF 試行が確認されたことに合意し、同じ `splice_txid` で `splice_locked` を交換してスプライスを完了できます。
 
 ## チャネルクローズ
 
-ノードは接続の相互クローズを交渉できます。これは一方的なクローズとは異なり、資金に即座にアクセスでき、手数料を低く抑えて交渉することが可能です。
+ノードは接続の相互クローズを交渉できます。これは一方的クローズとは異なり、資金にすぐアクセスでき、より低い手数料で交渉できます。
 
-クローズは二段階で行われます：
-1. 一方がチャネルをクリアしたいことを示し（新しい HTLC を受け入れない）
-2. すべての HTLC が解決された後、最終的なチャネルクローズの交渉が始まります。
+クローズは 2 段階で進みます:
+1. 一方がチャネルをクリアしたいことを示します (これにより新しい HTLC を受け付けなくなります)。
+2. すべての HTLC が解決されたあと、最終的なチャネルクローズ交渉が始まります。
 
-        +-------+                              +-------+
-        |       |--(1)-----  shutdown  ------->|       |
-        |       |<-(2)-----  shutdown  --------|       |
-        |       |                              |       |
-        |       | <complete all pending HTLCs> |       |
-        |   A   |                 ...          |   B   |
-        |       |                              |       |
-        |       |--(3)-- closing_signed  F1--->|       |
-        |       |<-(4)-- closing_signed  F2----|       |
-        |       |              ...             |       |
-        |       |--(?)-- closing_signed  Fn--->|       |
-        |       |<-(?)-- closing_signed  Fn----|       |
-        +-------+                              +-------+
+        +-------+                                                          +-------+
+        |       | shutdown(scriptA1)                                       |       |
+        |       |--------------------------------------------------------->|       |
+        |       |                                       shutdown(scriptB1) |       |
+        |       |<---------------------------------------------------------|       |
+        |       |                                                          |       |
+        |       |               <complete all pending HTLCs>               |       |
+        |   A   |                           ....                           |   B   |
+        |       |                                                          |       |
+        |       | closing_complete(scriptA1, scriptB1, 1000 sat)           |       |
+        |       |--------------------------------------------------------->|       |
+        |       |            closing_complete(scriptB1, scriptA1, 750 sat) |       |
+        |       |<---------------------------------------------------------|       |
+        |       |                closing_sig(scriptA1, scriptB1, 1000 sat) |       |
+        |       |<---------------------------------------------------------|       |
+        |       | closing_sig(scriptB1, scriptA1, 750 sat)                 |       |
+        |       |--------------------------------------------------------->|       |
+        +-------+                                                          +-------+
 
 ### クローズの開始: `shutdown`
 
@@ -1234,58 +1649,218 @@ RBF 試行の途中で有効な `channel_ready` メッセージを受信した�
 
 #### 要件
 
-送信ノード：
-  - `funding_created`（ファンダーの場合）または `funding_signed`（ファンディーの場合）を送信していない場合：
+送信ノード:
+  - `funding_created` (ファンダーの場合) または `funding_signed` (ファンディーの場合) を送信していない場合:
     - `shutdown` を送信してはなりません。
-  - `channel_ready` の前、つまりファンディングトランザクションが `minimum_depth` に達する前に `shutdown` を送信してもかまいません。
-  - 受信ノードのコミットメントトランザクションに保留中の更新がある場合：
+  - `channel_ready` の前、つまり資金調達トランザクションが `minimum_depth` に達する前に `shutdown` を送信してもよいです。
+  - 受信ノードのコミットメントトランザクションに保留中の更新がある場合:
     - `shutdown` を送信してはなりません。
   - 複数の `shutdown` メッセージを送信してはなりません。
+  - まだロックされていないスプライストランザクションがある場合、`shutdown` を送信してはなりません。
   - `shutdown` の後に `update_add_htlc` を送信してはなりません。
-  - どちらのコミットメントトランザクションにも HTLC が残っていない場合（ダスト HTLC を含む）で、どちらの側にも送信する保留中の `revoke_and_ack` がない場合：
-    - その時点以降に `update` メッセージを送信してはなりません。
-  - `shutdown` を送信した後に追加された HTLC のルートを失敗させるべきです。
-  - `open_channel` または `accept_channel` で非ゼロ長の `shutdown_scriptpubkey` を送信した場合：
-    - `scriptpubkey` に同じ値を送信しなければなりません。
-  - `scriptpubkey` を次の形式のいずれかに設定しなければなりません：
+  - どちらのコミットメントトランザクションにも HTLC が残っておらず (ダスト HTLC を含む)、どちらの側にも送信すべき `revoke_and_ack` がない場合:
+    - その時点以降、`update` メッセージを送信してはなりません。
+  - `shutdown` 送信後に追加された HTLC のルートは失敗させるべきです。
+  - `open_channel` または `accept_channel` でゼロ長でない `shutdown_scriptpubkey` を送信していた場合:
+    - `scriptpubkey` には同じ値を送信しなければなりません。
+  - `scriptpubkey` は次のいずれかの形式に設定しなければなりません:
 
+    1. `OP_0` `20` 20 バイト (witness pubkey hash バージョン 0 への支払い)、または
+    2. `OP_0` `32` 32 バイト (witness script hash バージョン 0 への支払い)、または
+    3. `option_shutdown_anysegwit` が交渉された場合に限り:
+       * `OP_1` から `OP_16` のいずれか、続いて 2 から 40 バイトの単一プッシュ (witness プログラムバージョン 1 から 16)。
+    4. `option_simple_close` が交渉された場合に限り:
+       * `OP_RETURN` の後に以下のいずれか:
+         * `6` から `75` の値、続いてその値ぶんのバイト
+         * `76`、続いて `76` から `80` の値、続いてその値ぶんのバイト
 
-1. `OP_0` `20` 20バイト (バージョン 0 の witness pubkey hash への支払い)、または
-2. `OP_0` `32` 32バイト (バージョン 0 の witness script hash への支払い)、または
-3. `option_shutdown_anysegwit` が交渉された場合に限り：
-   * `OP_1` から `OP_16` までのいずれかに続いて、2 から 40 バイトの単一プッシュ
-     (witness プログラムバージョン 1 から 16)
-
-受信ノード：
-- `funding_signed` (資金提供者の場合) または `funding_created` (資金受領者の場合) を受信していない場合：
+受信ノード:
+- `funding_signed` (ファンダーの場合) または `funding_created` (ファンディーの場合) を受信していない場合:
   - `error` を送信してチャネルを失敗させるべきです。
-- `scriptpubkey` が上記の形式のいずれでもない場合：
-  - `warning` を送信するべきです。
-- まだ `channel_ready` を送信していない場合：
-  - `shutdown` メッセージに `shutdown` で応答してもかまいません。
-- ピアに未解決の更新がない場合、すでに `shutdown` を送信していない限り：
-  - `shutdown` メッセージに `shutdown` で応答しなければなりません。
-- 両方のノードが `option_upfront_shutdown_script` 機能を広告し、受信ノードが `open_channel` または `accept_channel` で非ゼロ長の `shutdown_scriptpubkey` を受信し、その `shutdown_scriptpubkey` が `scriptpubkey` と等しくない場合：
-  - `warning` を送信してもかまいません。
+- `scriptpubkey` が上記の形式のいずれにも該当しない場合:
+  - `warning` を送信すべきです。
+- まだ `channel_ready` を送信していない場合:
+  - `shutdown` メッセージに対して `shutdown` で返信してもよいです。
+- ピアに未解決の更新がなくなり、かつ自身がまだ `shutdown` を送信していない場合:
+  - `shutdown` メッセージに対して `shutdown` で返信しなければなりません。
+- 両方のノードが `option_upfront_shutdown_script` を広告しており、受信ノードが `open_channel` または `accept_channel` でゼロ長でない `shutdown_scriptpubkey` を受信していて、その `shutdown_scriptpubkey` が `scriptpubkey` と一致しない場合:
+  - `warning` を送信してもよいです。
   - 接続を失敗させなければなりません。
 
-#### 理論的根拠
+#### 根拠
 
-シャットダウンが開始されるときにチャネルの状態が常に「クリーン」(保留中の変更がない) である場合、そうでなかった場合の振る舞いの問題を避けることができます：送信者は常に最初に `commitment_signed` を送信します。
+シャットダウン開始時にチャネル状態が常に「クリーン」(保留中の変更なし) であるようにすれば、そうでない場合の挙動を考えなくて済みます。送信者は常に先に `commitment_signed` を送ります。
 
-シャットダウンは終了の意図を示唆するため、新しい HTLC が追加または受け入れられることはありません。HTLC がクリアされると、取り消しが必要なコミットメントはなくなり、すべての更新が両方のコミットメントトランザクションに含まれるため、ピアはすぐに閉鎖交渉を開始できます。そのため、コミットメントトランザクションへのさらなる更新を禁止します (特に、`update_fee` はそうでなければ可能です)。ただし、コミットメントトランザクションに HTLC がある場合、イニシエータは未解決の HTLC がタイムアウトする可能性があるため、手数料率を上げることが望ましいかもしれません。
+シャットダウンはチャネル終了の意図を示すため、新しい HTLC は追加・受け入れされません。HTLC がクリアされれば、取り消しが必要なコミットメントは残らず、すべての更新が両方のコミットメントトランザクションに含まれるので、ピアはすぐにクローズ交渉を開始できます。このため、コミットメントトランザクションへのこれ以上の更新は禁止します (特に `update_fee` は許してしまうため)。ただし、コミットメントトランザクションに HTLC が残っている間は、HTLC のタイムアウトに備えて、イニシエータが手数料率を上げることが望ましい場合があります。
 
-`scriptpubkey` の形式には、Bitcoin ネットワークによって受け入れられる標準的な segwit 形式のみが含まれており、結果として得られるトランザクションがマイナーに伝播することを保証します。ただし、古いノードは非 segwit スクリプトを送信することがあり、これは後方互換性のために受け入れられるかもしれません (この出力がダストリレー要件を満たさない場合は強制的に閉鎖するという注意付きで)。
+`scriptpubkey` の形式には、Bitcoin ネットワークが受け入れる標準的な segwit 形式のみを含めることで、結果として得られるトランザクションがマイナーへ確実に伝播することを保証します。ただし、後方互換性のために、古いノードが送ってくる非 segwit スクリプトを受け入れることがあるかもしれません (この出力がダストリレー要件を満たさない場合には強制クローズが必要となる旨に注意が必要です)。
 
-`option_upfront_shutdown_script` 機能は、ノードが何らかの形で侵害された場合に `shutdown_scriptpubkey` に事前にコミットしたいという意図を示します。これは弱いコミットメントです（悪意のある実装はこのような仕様を無視しがちです）が、`scriptpubkey` を変更するために受信ノードの協力を必要とすることで、セキュリティを段階的に向上させます。
+`option_upfront_shutdown_script` 機能は、ノードが侵害された場合に備えて `shutdown_scriptpubkey` に事前にコミットしたいという意図を表します。これは弱いコミットメント (悪意ある実装はこの種の仕様を無視しがちです) ですが、`scriptpubkey` の変更に受信ノードの協力を必要とすることで、セキュリティを段階的に高めます。
 
-`shutdown` 応答の要件は、ノードが返信する前に未処理の変更をコミットするために `commitment_signed` を送信することを意味します。ただし、理論的には再接続することも可能であり、その場合は未コミットのすべての変更が単に消去されます。
+`shutdown` への返信要件は、返信する前に未処理の変更をコミットするため `commitment_signed` を送ることを意味します。理論的には代わりに再接続することもでき、その場合は未コミットの変更がすべて消去されます。
 
-### クローズ交渉: `closing_signed`
+`OP_RETURN` は、PUSH オペコードのみが続き、スクリプト全体が 83 バイト以下である場合のみ標準とみなされます。本仕様では、それを少し厳しくして単一の PUSH のみを許容しています。これにはスクリプト上 2 つの形式があり、1 つは最大 75 バイトをプッシュする形式、もう 1 つは 76〜80 バイトに必要な長めの形式 (`OP_PUSHDATA1`) です。
 
-シャットダウンが完了し、チャネルが HTLC を持たず、取り消しが必要なコミットメントがなく、すべての更新が両方のコミットメントに含まれている場合、最終的な現在のコミットメントトランザクションには HTLC がなく、クローズ手数料の交渉が始まります。資金提供者は公正だと思う手数料を選び、`shutdown` メッセージの `scriptpubkey` フィールド（および選択した手数料）でクローズトランザクションに署名し、署名を送信します。その後、他のノードも同様に返信し、公正だと思う手数料を使用します。このやり取りは、両者が同じ手数料に合意するか、一方がチャネルを失敗させるまで続きます。
+### クローズ交渉: `closing_complete` と `closing_sig`
 
-現代の方法では、資金提供者が許容可能な手数料範囲を送信し、非資金提供者がこの範囲内で手数料を選ぶ必要があります。非資金提供者が同じ値を選んだ場合、交渉は 2 つのメッセージで完了します。そうでない場合、資金提供者は同じ値で返信し、3 つのメッセージで完了します。
+シャットダウンが完了し、チャネルから HTLC がなくなり、取り消し待ちのコミットメントもなく、すべての更新が両方のコミットメントに反映されると、最終的な現行コミットメントトランザクションには HTLC がない状態になります。
+
+`option_simple_close` が交渉されていない場合は、下記の [レガシークローズ交渉](#legacy-closing-negotiation-closing_signed) を参照してください。
+
+各ピアは自身が手数料を支払うクローズトランザクションを作り、そのトランザクションの詳細を含めて `closing_complete` を相手ピアに送ります。受け取ったピアはそのトランザクションに署名し、`closing_sig` を返します。これにより各ピアが独立に `closing_complete` を送って `closing_sig` を受け取り、独立した (互いに競合する) 2 つのクローズトランザクションが作られます。
+
+支払い額の少ない側は (もしいれば)、自分の出力をクローズトランザクションから省略してもよいです。
+
+このプロセスは `closing_complete` を再送することで何度でも繰り返せ、手数料の増加や出力スクリプトの変更を行えます。
+
+1. type: 40 (`closing_complete`)
+2. data:
+   * [`channel_id`:`channel_id`]
+   * [`u16`:`closer_scriptpubkey_len`]
+   * [`closer_scriptpubkey_len*byte`:`closer_scriptpubkey`]
+   * [`u16`:`closee_scriptpubkey_len`]
+   * [`closee_scriptpubkey_len*byte`:`closee_scriptpubkey`]
+   * [`u64`:`fee_satoshis`]
+   * [`u32`:`locktime`]
+   * [`closing_tlvs`:`tlvs`]
+
+1. type: 41 (`closing_sig`)
+2. data:
+   * [`channel_id`:`channel_id`]
+   * [`u16`:`closer_scriptpubkey_len`]
+   * [`closer_scriptpubkey_len*byte`:`closer_scriptpubkey`]
+   * [`u16`:`closee_scriptpubkey_len`]
+   * [`closee_scriptpubkey_len*byte`:`closee_scriptpubkey`]
+   * [`u64`:`fee_satoshis`]
+   * [`u32`:`locktime`]
+   * [`closing_tlvs`:`tlvs`]
+
+1. `tlv_stream`: `closing_tlvs`
+2. types:
+    1. type: 1 (`closer_output_only`)
+    2. data:
+        * [`signature`:`sig`]
+    1. type: 2 (`closee_output_only`)
+    2. data:
+        * [`signature`:`sig`]
+    1. type: 3 (`closer_and_closee_outputs`)
+    2. data:
+        * [`signature`:`sig`]
+
+#### 要件
+
+注: 署名対象トランザクションの詳細と要件は [BOLT 3](03-transactions.md#closing-transaction) を参照してください。
+
+ある出力が [Bitcoin Core のダスト閾値](03-transactions.md#dust-limits) より小さい場合、その出力は *ダスト* と見なされます。
+
+注: ここに書かれた要件は `option_simple_close` が交渉された場合のみ適用されます。それ以外の場合の要件は [レガシークローズ交渉](#legacy-closing-negotiation-closing_signed) にあります。
+
+両ノード:
+  - `shutdown` を送受信した後で、どちらのコミットメントトランザクションにも HTLC が残っていない場合:
+    - `closing_complete` を送信すべきです。
+
+`closing_complete` の送信者 (「クローザー」):
+  - `fee_satoshis` を、自身の残高以下の額にサトシ単位で切り下げて設定しなければなりません。
+  - 少なくとも 1 つの出力がダストにならないように `fee_satoshis` を設定しなければなりません。
+  - `closer_scriptpubkey` を、自身が望む出力スクリプトに設定しなければなりません。
+  - `closee_scriptpubkey` を、ピアから直近に受信したスクリプト (`closing_complete` から、または最初の `shutdown` から) に設定しなければなりません。
+  - `locktime` を、クローズトランザクションの希望する `nLockTime` に設定しなければなりません。
+  - 自身の残高 (millisatoshi) がリモート残高より少ない場合:
+    - `closer_output_only` を設定してはなりません。
+    - 自身の出力金額がダストの場合、`closee_output_only` を設定しなければなりません。
+    - 自身の出力金額が経済的でないと判断され、かつ `closer_scriptpubkey` が `OP_RETURN` でない場合、`closee_output_only` を設定してもよいです。
+  - そうでない場合 (残高が少ない側ではないため、自分の出力を取り除けない):
+    - `closee_output_only` を設定してはなりません。
+    - 自身の出力金額が経済的でないと判断する場合:
+      - 有効な `OP_RETURN` スクリプトを `closer_scriptpubkey` として送信してもよいです。
+      - その場合、出力金額はゼロに設定し、すべての資金が手数料に回るようにしなければなりません ([BOLT #3](03-transactions.md#closing-transaction) を参照)。
+    - クローズイーの出力金額がダストの場合:
+      - `closer_output_only` を設定しなければなりません。
+      - `closer_and_closee_outputs` を設定してはなりません。
+    - そうでない場合:
+      - `closer_output_only` と `closer_and_closee_outputs` の両方を設定しなければなりません。
+  - クローズトランザクションは [BOLT #3](03-transactions.md#closing-transaction) に従って生成しなければなりません。
+  - `signature` フィールドには、自身の `funding_pubkey` を用いた以下の有効な署名を設定しなければなりません:
+    - `closer_output_only`: ローカル ("クローザー") 出力のみのクローズトランザクション。
+    - `closee_output_only`: リモート ("クローズイー") 出力のみのクローズトランザクション。
+    - `closer_and_closee_outputs`: クローザーとクローズイー両方の出力を持つクローズトランザクション。
+  - 別の `closing_complete` を送りたい場合 (例: 別の `fee_satoshis` や `closer_scriptpubkey` で):
+    - まず `closing_sig` を受け取るまで待たなければなりません。
+    - `closing_sig` を受信できない場合、接続を閉じるべきです。
+
+`closing_complete` の受信者 (「クローズイー」):
+  - `fee_satoshis` がクローザーの残高を超える場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - `closee_scriptpubkey` が、自身が直近に送信したスクリプト (`closing_complete` から、または最初の `shutdown` から) と一致しない場合:
+    - `closing_complete` を無視すべきです。
+    - `warning` を送信すべきです。
+    - 接続を閉じるべきです。
+  - `closer_scriptpubkey` が無効な場合 ([`shutdown` の要件](#closing-initiation-shutdown) を参照):
+    - `closing_complete` を無視すべきです。
+    - `warning` を送信すべきです。
+    - 接続を閉じるべきです。
+  - `closer_scriptpubkey` が有効な `OP_RETURN` スクリプトの場合:
+    - クローザー出力の金額をゼロに設定し、すべての資金が手数料に回るようにしなければなりません ([BOLT #3](03-transactions.md#closing-transaction) を参照)。
+  - リモートクローズトランザクションを [BOLT #3](03-transactions.md#closing-transaction) に従って生成しなければなりません。
+  - 検証する署名を以下のように選択します:
+    - 自身の出力金額がダストの場合:
+      - `closer_output_only` を使用しなければなりません。
+    - そうでなく、自身の出力金額が経済的でないと判断され、かつ `closee_scriptpubkey` が `OP_RETURN` でない場合:
+      - `closer_output_only` を使用しなければなりません。
+    - そうでなく、`closer_and_closee_outputs` が含まれる場合:
+      - `closer_and_closee_outputs` を使用しなければなりません。
+    - それ以外の場合:
+      - `closee_output_only` を使用しなければなりません。
+  - 選択した署名フィールドが存在しない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 該当するクローズトランザクションに対して署名フィールドが無効な場合 ([BOLT #3](03-transactions.md#closing-transaction) を参照):
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 署名フィールドが LOW-S 標準ルール<sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup>に準拠していない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 該当するクローズトランザクションに署名してブロードキャストしなければなりません。
+  - `closing_sig` には、`closing_complete` と同じ TLV フィールドに有効な単一の署名を入れて送信しなければなりません。
+  - 自分が今後送る `closing_complete` メッセージでは `closer_scriptpubkey` を使用しなければなりません。
+
+`closing_sig` の受信者:
+  - `closer_scriptpubkey`、`closee_scriptpubkey`、`fee_satoshis`、または `locktime` が `closing_complete` で送ったものと一致しない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - `tlvs` にちょうど 1 つの署名が含まれていない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - `tlvs` に `closing_complete` で送った TLV フィールドが含まれていない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 該当するクローズトランザクションに対して署名フィールドが無効な場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 署名フィールドが LOW-S 標準ルール<sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup>に準拠していない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - そうでない場合:
+    - 該当するクローズトランザクションをブロードキャストしなければなりません。
+  - 別の `fee_satoshis` や `closer_scriptpubkey` で `closing_complete` を再度送ってもよいです。
+
+### 根拠
+
+クローズプロトコルは、各側が自身の希望する手数料を支払う形にすることで、手数料合意の不一致による失敗シナリオを避ける設計になっています。
+
+一方の残高が他方より少ない場合は、自分の出力を省略することを選んでもよいですが、その場合は得られたトランザクションがブロードキャスト可能となるようにダストを必ず省略しなければなりません。
+
+両方の出力がダストになるほど手数料が高い場合のコーナーケースには 2 通りの対応があります: 低い手数料を払って問題を回避するか、`OP_RETURN` を使うか (これは「ダスト」になり得ません) です。一方が `OP_RETURN` 出力を選んだ場合、ブロードキャストできるよう金額は 0 でなければなりません。
+
+通常、迅速処理のために高い手数料を払う理由はありません。緊急の子トランザクションがクローズトランザクションの代わりに手数料を払えるためです。CPFP が使えず、迅速処理が望まれる場合、クローザーは `closing_complete` を再送して、以前のクローズトランザクションを RBF できます。
+
+新しい `closing_complete` メッセージは以前のものを上書きするため、再交渉も可能です (`upfront_shutdown_script` が交渉されていなければ出力アドレスも変更可能)。両ノードが同時に `closer_scriptpubkey` を変更しようとして `closing_complete` を送ったときには、稀ですがレース条件が起きます。受信した `closing_complete` は相手が以前の出力スクリプトを使っていることになるため、対応するトランザクションには署名すべきではありません。この場合は再接続するだけでよく、それにより両ノードが `shutdown` で最新の出力スクリプトを送り直し、署名フローを再開する機会が得られます。`closing_sig` にもクローザー/クローズイーのスクリプトを含めることで、相手がスクリプト不一致を検出して署名を正しく無視できるようにし、レース条件のデバッグも助けます。
+
+クローザーがリレーされないトランザクション (出力がダストである、または手数料率が低すぎる) を提案しても、クローズイーが署名すること自体に害はありません。
+
+同様に、クローザーが高い手数料を提案しても、クローザーが支払うのですからクローズイーが署名しても害はありません。
+
+各側は手数料を相手に押し付けたいと考え、最小限の手数料を提案する弱いゲームが発生します。どちらの側もリレーされる手数料を提案しなかった場合、再交渉するか、最終的なコミットメントトランザクションを使うことになります。実際にはオープナー側がコミットメントトランザクションの手数料を負担し、その消費にもさらに手数料がかかるため、合理的なクローズ手数料を提示するインセンティブがあります。
+
+### レガシークローズ交渉: `closing_signed`
+
+シャットダウンが完了し、チャネルから HTLC がなくなり、取り消し待ちのコミットメントもなく、すべての更新が両方のコミットメントに含まれた状態になると、最終的な現行コミットメントトランザクションには HTLC が無くなり、クローズ手数料の交渉が始まります。`option_simple_close` が交渉されている場合は前節が適用され、それ以外の場合に本節が適用されます。
+
+ファンダーは公平と判断する手数料を選び、`shutdown` メッセージの `scriptpubkey` フィールド (および選択した手数料) でクローズトランザクションに署名し、署名を送信します。次にもう一方のノードも同様に、自分が公平と思う手数料で返答します。このやり取りは両者が同じ手数料に合意するか、一方がチャネルを失敗させるまで続きます。
+
+現代的な方式では、ファンダーが許容できる手数料の範囲を送り、非ファンダーがその範囲内から手数料を選びます。非ファンダーが同じ値を選んだ場合は 2 メッセージで交渉が完了し、そうでない場合はファンダーが同じ値で返答するため 3 メッセージで完了します。
 
 1. type: 39 (`closing_signed`)
 2. data:
@@ -1303,9 +1878,11 @@ RBF 試行の途中で有効な `channel_ready` メッセージを受信した�
 
 #### 要件
 
-資金提供ノード：
-  - `shutdown` が受信され、かつどちらのコミットメントトランザクションにも HTLC が残っていない場合：
-    - `closing_signed` メッセージを送信する *べき* です。
+注: ここの要件は `option_simple_close` が交渉されていない場合のみ適用されます。それ以外の場合は [クローズ交渉: `closing_complete` と `closing_sig`](#closing-negotiation-closing_complete-and-closing_sig) の要件が適用されます。
+
+ファンディングノード:
+  - `shutdown` が受信されており、どちらのコミットメントトランザクションにも HTLC が残っていない場合:
+    - `closing_signed` メッセージを送信すべきです。
 
 送信ノード：
 
@@ -1354,18 +1931,18 @@ RBF 試行の途中で有効な `channel_ready` メッセージを受信した�
 
 受信ノード：
 
-- 閉鎖トランザクションの出力の一つが、その `scriptpubkey` のダスト制限を下回る場合（[BOLT 3](03-transactions.md#dust-limits)を参照）：
-  - チャネルを失敗させなければなりません
+- クローズトランザクションの出力のいずれかが、その `scriptpubkey` のダストリミットを下回る場合 ([BOLT 3](03-transactions.md#dust-limits) を参照):
+  - チャネルを失敗させなければなりません。
 
 #### 理論的根拠
 
 `fee_range` が提供されていない場合、「厳密に間にある」という要件は、たとえ 1 サトシずつであっても前進が行われることを保証します。状態を保持せず、切断と再接続の間に手数料が変動した場合のコーナーケースを処理するために、再接続時に交渉が再開されます。
 
-閉鎖トランザクションが遅延するリスクは限られていますが、非常に早くブロードキャストされるため、迅速な処理のためにプレミアムを支払う理由は通常ありません。
+クローズトランザクションが遅延するリスクは限定的で、すぐにブロードキャストされるため、通常は迅速処理のためにプレミアムを支払う理由はありません。
 
 非資金提供者は手数料を支払わないため、最大手数料率を持つ理由はありません。ただし、トランザクションが伝播することを保証するために、最小手数料率を持ちたいかもしれません。必要に応じて後で CPFP を使用して確認を早めることができるため、その最小値は低くするべきです。
 
-閉鎖トランザクションがビットコインのデフォルトのリレーポリシーを満たさないことがあるかもしれません（例えば、546 サトシ未満の出力に対して非セグウィットのシャットダウンスクリプトを使用する場合、`dust_limit_satoshis` が 546 サトシ未満である場合に可能です）。その場合、資金が危険にさらされることはありませんが、閉鎖トランザクションがマイナーに届くことはほぼないため、チャネルを強制的に閉鎖しなければなりません。
+クローズトランザクションが Bitcoin のデフォルトのリレーポリシーを満たさないことがあります (例えば 546 サトシ未満の出力に非 segwit のシャットダウンスクリプトを用いる場合。`dust_limit_satoshis` が 546 サトシ未満なら起こり得ます)。資金が危険にさらされることはありませんが、クローズトランザクションがマイナーまで届く可能性はほぼないため、チャネルを強制クローズしなければなりません。
 
 ## 通常の操作
 
@@ -1373,22 +1950,20 @@ RBF 試行の途中で有効な `channel_ready` メッセージを受信した�
 
 変更はバッチで送信されます。`commitment_signed` メッセージの前に 1 つ以上の `update_` メッセージが送信されます。以下の図のように：
 
-```
-    +-------+                               +-------+
-    |       |--(1)---- update_add_htlc ---->|       |
-    |       |--(2)---- update_add_htlc ---->|       |
-    |       |<-(3)---- update_add_htlc -----|       |
-    |       |                               |       |
-    |       |--(4)--- commitment_signed --->|       |
-    |   A   |<-(5)---- revoke_and_ack ------|   B   |
-    |       |                               |       |
-    |       |<-(6)--- commitment_signed ----|       |
-    |       |--(7)---- revoke_and_ack ----->|       |
-    |       |                               |       |
-    |       |--(8)--- commitment_signed --->|       |
-    |       |<-(9)---- revoke_and_ack ------|       |
-    +-------+                               +-------+
-```
+        +-------+                               +-------+
+        |       |--(1)---- update_add_htlc ---->|       |
+        |       |--(2)---- update_add_htlc ---->|       |
+        |       |<-(3)---- update_add_htlc -----|       |
+        |       |                               |       |
+        |       |--(4)--- commitment_signed --->|       |
+        |   A   |<-(5)---- revoke_and_ack ------|   B   |
+        |       |                               |       |
+        |       |<-(6)--- commitment_signed ----|       |
+        |       |--(7)---- revoke_and_ack ----->|       |
+        |       |                               |       |
+        |       |--(8)--- commitment_signed --->|       |
+        |       |<-(9)---- revoke_and_ack ------|       |
+        +-------+                               +-------+
 
 逆説的に言えば、これらの更新は*他のノードの*コミットメントトランザクションに適用されます。ノードは、リモートノードが `revoke_and_ack` を通じてそれらを適用したことを確認したときにのみ、自分のコミットメントトランザクションにそれらの更新を追加します。
 
@@ -1461,7 +2036,7 @@ HTLC がタイムアウトした場合、それは履行されるかタイムア
 6. 最悪のケース：A がコミットメントトランザクションを消費するために使用する `R` 深の再編成があり、B はブロック `N+G+S+R+G+R` で A のコミットメントトランザクションを見て、HTLC 出力を消費する必要があり、これには `S` ブロックかかります。
 7. B の HTLC 消費はタイムアウトする前に少なくとも `R` 深である必要があります。そうでないと、別の再編成により A がトランザクションをタイムアウトさせることができる可能性があります。
 
-したがって、最悪のケースは `3R+2G+2S` です。ただし、`R` が少なくとも 1 であると仮定します。`R` が 2 以上の場合、他のノードがすべての再編成に勝つ可能性は低いです。高い手数料が使用されるため (HTLC 消費はほぼ任意の手数料を使用できます)、通常の運用中は `S` は小さいはずです。ただし、ブロック時間が不規則であるため、空のブロックが発生し続け、手数料が大きく変動する可能性があり、HTLC トランザクションの手数料を引き上げることはできないため、`S=12` を最低限と考えるべきです。`S` は攻撃下で最も変動する可能性のあるパラメータでもあるため、無視できない金額が危険にさらされている場合は、より高い値が望ましいかもしれません。猶予期間 `G` は低く (1 または 2)、ノードはできるだけ早くタイムアウトまたは完了する必要があります。ただし、`G` が低すぎると、ネットワーク遅延による不要なチャネル閉鎖のリスクが高まります。
+したがって最悪ケースは `3R+2G+2S` です (ただし `R` は少なくとも 1 と仮定)。`R` が 2 以上のとき、他ノードが連続するすべての再編成に勝つ可能性は低くなります。HTLC の消費にはほぼ任意の手数料を付けられるため通常運用時の `S` は小さいはずですが、ブロック時間が不規則で空ブロックも生じ得て手数料は大きく変動し、HTLC トランザクションの手数料を引き上げる手段はないため、`S=12` を最小値と考えるべきです。`S` は攻撃下で最も変動しやすいパラメータでもあり、無視できない額が危険にさらされる場合はより大きな値が望まれることがあります。猶予期間 `G` は小さく (1 または 2) し、ノードはできるだけ早くタイムアウトまたは履行を行うべきです。ただし `G` が小さすぎると、ネットワーク遅延による不要なチャネルクローズのリスクが高まります。
 
 以下の 4 つの値を導出する必要があります。
 
@@ -1569,10 +2144,11 @@ HTLC がタイムアウトした場合、それは履行されるかタイムア
     - `id` を 0 に設定しなければなりません。
   - 各連続するオファーごとに `id` の値を 1 増やさなければなりません。
   - ブラインドルート内で支払いを中継している場合:
-    - `path_key` を設定しなければなりません（[ルートブラインディング](04-onion-routing.md#route-blinding)を参照）。
+    - `path_key` を設定しなければなりません ([ルートブラインディング](04-onion-routing.md#route-blinding) を参照)。
+  - スプライスが保留中の場合:
+    - すべてのコミットメントトランザクションについて要件を満たすことを保証しなければなりません。
 
-
-`id` は更新が完了した後（つまり `revoke_and_ack` が受信された後）に 0 にリセットしてはいけません。代わりに、継続してインクリメントし続ける必要があります。
+`id` は更新が完了したあと (`revoke_and_ack` を受信したあと) も 0 にリセットしてはいけません。代わりにインクリメントし続けなければなりません。
 
 受信ノード：
   - `amount_msat` が 0 に等しい、または自身の `htlc_minimum_msat` より少ない場合を受信した場合：
@@ -1589,12 +2165,14 @@ HTLC がタイムアウトした場合、それは履行されるかタイムア
   - 他の `id` 違反が発生した場合：
     - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させてもかまいません。
   - `onion_routing_packet` を [Onion Decryption](04-onion-routing.md#onion-decryption) で説明されているように復号して `payload` を抽出しなければなりません。
-    - `path_key`（指定されている場合）を使用しなければなりません。
+    - `path_key` (指定されている場合) を使用しなければなりません。
     - `payment_hash` を `associated_data` として使用しなければなりません。
-  - 復号に失敗した場合、結果が有効な `payload` TLV でない場合、または未知の偶数型を含む場合：
-    - [Failure Messages](04-onion-routing.md#failure-messages) で詳述されているようにエラーで応答しなければなりません。
-  - それ以外の場合：
-    - [Payload Format](04-onion-routing.md#payload-format) の `payload` のリーダーに対する要件に従わなければなりません。
+  - 復号に失敗した、結果が有効な `payload` TLV でない、または未知の偶数型を含む場合:
+    - [Failure Messages](04-onion-routing.md#failure-messages) に詳述されたエラーで応答しなければなりません。
+  - それ以外の場合:
+    - [Payload Format](04-onion-routing.md#payload-format) のリーダー要件に従わなければなりません。
+  - スプライスが保留中の場合:
+    - すべてのコミットメントトランザクションについて要件を満たすことを保証しなければなりません。
 
 `onion_routing_packet` には、経路に沿った各ホップのための指示とホップのリストが難読化された状態で含まれています。これは `payment_hash` を関連データとして設定することで HTLC にコミットします。つまり、HMAC の計算に `payment_hash` を含めます。これにより、異なる `payment_hash` で以前の `onion_routing_packet` を再利用するリプレイ攻撃を防ぎます。
 
@@ -1686,49 +2264,124 @@ HTLC のタイムアウトを設定しないノードは、チャネルの失敗
 
 ブラインドルート内のノードは、`invalid_onion_blinding` を使用して、ブラインドルートをプローブしようとする送信者に情報を漏らさないようにする必要があります。
 
-### これまでの更新のコミット: `commitment_signed`
+### チャネルメッセージのバッチ処理
 
-ノードがリモートコミットメントに対して変更を持っている場合、それを適用し、結果として得られるトランザクションに署名し（[BOLT #3](03-transactions.md)で定義されています）、`commitment_signed` メッセージを送信できます。
+複数のチャネルメッセージは、`start_batch` メッセージを使うことで 1 つの論理メッセージとしてまとめて扱えます。
 
-1. タイプ: 132 (`commitment_signed`)
-2. データ:
+1. type: 127 (`start_batch`)
+2. data:
    * [`channel_id`:`channel_id`]
-   * [`signature`:`signature`]
-   * [`u16`:`num_htlcs`]
-   * [`num_htlcs*signature`:`htlc_signature`]
+   * [`u16`:`batch_size`]
+
+1. `tlv_stream`: `start_batch_tlvs`
+2. types:
+   1. type: 1 (`message_type`)
+   2. data:
+     * [`u16`:`message_type`]
 
 #### 要件
 
 送信ノード:
-  - 更新を含まない `commitment_signed` メッセージを送信してはなりません。
-  - 手数料のみを変更する `commitment_signed` メッセージを送信してもかまいません。
-  - 新しい取り消し番号以外にコミットメントトランザクションを変更しない `commitment_signed` メッセージを送信してもかまいません（ダスト、同一 HTLC の置換、または重要でない複数の手数料変更による）。
-  - コミットメントトランザクションの順序に対応するすべての HTLC トランザクションに対して 1 つの `htlc_signature` を含めなければなりません（[BOLT #3](03-transactions.md#transaction-input-and-output-ordering)を参照）。
+  - `batch_size` を 1 より大きい値に設定しなければなりません。
+  - `batch_size` を 20 以下の値に設定しなければなりません。
+  - `message_type` を `132` (すなわち [BOLT 1](./01-messaging.md#lightning-message-format) で定義された `commitment_signed` メッセージ型) に設定しなければなりません。
+  - `start_batch` を送信した後:
+    - 同じ `channel_id` の `commitment_signed` メッセージを `batch_size` 個、間に無関係なメッセージを挟まずに送信しなければなりません。
+
+受信ノード:
+  - `batch_size` が 1 より大きくない場合:
+    - `start_batch` メッセージを無視しなければなりません。
+    - `warning` を送信すべきです。
+  - `batch_size` が 20 を超える場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 続く `batch_size` 個のメッセージをグループ化し、まとめて処理しなければなりません。
+  - そのうちのいずれかが指定された `channel_id` 向けでない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - `message_type` が指定されていない、または `commitment_signed` の型に設定されていない場合:
+    - `start_batch` メッセージを無視し、続くメッセージは順次処理しなければなりません。
+
+#### 根拠
+
+`start_batch` メッセージは現状、スプライシング中に複数の `commitment_signed` を送信する場合にのみ用いられます。そのためここではこの特定のシナリオに合わせて要件を絞っています。将来 `start_batch` を他の機能に使う場合には、この要件は緩和されてよいです。
+
+`batch_size` を 20 に制限しているのは、過剰なキューイングを悪用した受信ノードへの DoS を防ぐためです。`start_batch` は今のところスプライス RBF 試行のみで使われ、トランザクションを確認させるのにそれほど多くの試行は不要です。
+
+### これまでの更新のコミット: `commitment_signed`
+
+ノードがリモートコミットメントに変更を持っている場合、それを適用し ([BOLT #3](03-transactions.md) で定義された) 結果のトランザクションに署名して `commitment_signed` メッセージを送信できます。
+
+1. type: 132 (`commitment_signed`)
+2. data:
+   * [`channel_id`:`channel_id`]
+   * [`signature`:`signature`]
+   * [`u16`:`num_htlcs`]
+   * [`num_htlcs*signature`:`htlc_signature`]
+   * [`commitment_signed_tlvs`:`tlvs`]
+
+1. `tlv_stream`: `commitment_signed_tlvs`
+2. types:
+   1. type: 1 (`funding_txid`)
+   2. data:
+     * [`sha256`:`funding_txid`]
+
+#### 要件
+
+送信ノード:
+  - 更新を 1 つも含まない `commitment_signed` メッセージを送信してはなりません。
+  - 手数料のみを変更する `commitment_signed` メッセージを送信してもよいです。
+  - 新しい取り消し番号以外にコミットメントトランザクションを変更しない `commitment_signed` メッセージを送信してもよいです (ダスト化、同一 HTLC の差し替え、または無視できる手数料変更などによる)。
+  - コミットメントトランザクションの並びに対応する HTLC トランザクションごとに、対応する `htlc_signature` を 1 つ含めなければなりません ([BOLT #3](03-transactions.md#transaction-input-and-output-ordering) を参照)。
+  - `funding_txid` を、このコミットメントトランザクションが消費する資金調達トランザクションに設定しなければなりません。
   - 最近リモートノードからメッセージを受信していない場合:
-      - `ping` を使用し、`commitment_signed` を送信する前に返信 `pong` を待つべきです。
+    - `commitment_signed` を送信する前に `ping` を使い、`pong` の返信を待つべきです。
+  - 保留中のスプライストランザクションが `N` 個 (`N` > 0) ある場合:
+    - 先に `start_batch` を、`batch_size` を `N + 1` に、`message_type` を `132` (`commitment_signed`) に設定して送信しなければなりません。
+    - 現在のチャネル資金調達出力に対する `commitment_signed` を送信しなければなりません。
+    - 各スプライストランザクションに対して `commitment_signed` を送信しなければなりません。
+    - 各 `commitment_signed` メッセージの `funding_txid` を、対応するコミットメントトランザクションが消費する資金調達トランザクションに設定しなければなりません。
+    - 一連の `commitment_signed` を送り終えるまで、他のメッセージを送信してはなりません。
 
-受信ノードは以下のように動作します：
-
-- 保留中のすべての更新が適用された後：
-  - `signature` がローカルのコミットメントトランザクションに対して無効であるか、LOW-S 標準ルール <sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup> に準拠していない場合：
+受信ノード:
+  - 保留中のすべての更新が適用されたあと:
+    - `signature` がローカルコミットメントトランザクションに対して無効、または LOW-S 標準ルール<sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup>に準拠していない場合:
+      - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+    - `num_htlcs` がローカルコミットメントトランザクションの HTLC 出力数と一致しない場合:
+      - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - いずれかの `htlc_signature` が対応する HTLC トランザクションに対して無効、または LOW-S 標準ルール<sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup>に準拠していない場合:
     - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
-  - `num_htlcs` がローカルコミットメントトランザクションの HTLC 出力の数と等しくない場合：
-    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
-- いずれかの `htlc_signature` が対応する HTLC トランザクションに対して無効であるか、LOW-S 標準ルール <sup>[LOWS](https://github.com/bitcoin/bitcoin/pull/6769)</sup> に準拠していない場合：
-  - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
-- `revoke_and_ack` メッセージで応答しなければなりません。
+  - 保留中のスプライストランザクションがあるにもかかわらず、送信ノードが `start_batch` を送らずにそのバッチを送ってこなかった場合:
+    - `error` を送信してチャネルを失敗させなければなりません。
+  - 送信ノードが `start_batch` を送り、`commitment_signed` のバッチを処理している場合:
+    - いずれかの `commitment_signed` メッセージで `funding_txid` が欠けている場合:
+      - `error` を送信してチャネルを失敗させなければなりません。
+    - 保留中のスプライストランザクションがある場合:
+      - 各 `commitment_signed` を `funding_txid` に基づいて検証しなければなりません。
+      - ある資金調達トランザクションに対する `commitment_signed` が欠けている場合:
+        - `error` を送信してチャネルを失敗させなければなりません。
+      - そうでない場合:
+        - `revoke_and_ack` メッセージで応答しなければなりません。
+    - そうでない (保留中のスプライストランザクションがない) 場合:
+      - `funding_txid` が現在の資金調達トランザクションと一致しない `commitment_signed` は無視しなければなりません。
+      - 現在の資金調達トランザクションに対する `commitment_signed` が欠けている場合:
+        - `error` を送信してチャネルを失敗させなければなりません。
+      - そうでない場合:
+        - `revoke_and_ack` メッセージで応答しなければなりません。
+  - それ以外の場合:
+    - `revoke_and_ack` メッセージで応答しなければなりません。
 
-#### 理論的根拠
+#### 根拠
 
-スパム更新を提供することにはほとんど意味がありません。それはバグを示唆します。
+スパム的な更新を送ることにはほとんど意味がなく、バグを示唆します。
 
-`num_htlcs` フィールドは冗長ですが、パケット長のチェックを完全に自己完結させます。
+`num_htlcs` フィールドは冗長ですが、パケット長のチェックを完全に自己完結させるために使われます。
 
-最近のメッセージを要求することを推奨するのは、ネットワークが信頼できないという現実を認識しているからです。ノードは、`commitment_signed` を送信するまでピアがオフラインであることに気づかないかもしれません。`commitment_signed` が送信されると、送信者はそれらの HTLC に拘束されていると見なされ、出力 HTLC が完全に解決されるまで関連する受信 HTLC を失敗させることはできません。
+最近のメッセージ受信を要求するのは、ネットワークが信頼できないという現実への対応です。ノードは `commitment_signed` を送るまでピアがオフラインであることに気づかないかもしれません。`commitment_signed` が送信されると、送信者は HTLC に拘束されたとみなされ、出力 HTLC が完全に解決されるまで対応する受信 HTLC を失敗させられなくなります。
 
-`htlc_signature` は、提供された HTLC がタイムアウトした場合や受信した HTLC が消費された場合に、タイムロックメカニズムを暗黙的に強制します。これは、HTLC 出力にタイムロックを明示的に記載するよりも小さなスクリプトを作成することで手数料を削減するために行われます。
+`htlc_signature` は、提供 HTLC のタイムアウトや受信 HTLC の消費時に、タイムロックの仕組みを暗黙に強制します。これにより、HTLC 出力にタイムロックを明示的に書き込むよりもスクリプトを小さくでき、手数料を抑えられます。
 
-`option_anchors` は、HTLC トランザクションが他の入力と出力を添付することで「独自の手数料を持ち込む」ことを可能にし、したがって修正された署名フラグを使用します。
+`option_anchors` は、HTLC トランザクションが他の入力・出力を追加して「自分の手数料を持ち込む」ことを許すため、署名フラグを修正したものを使います。
+
+スプライシングでは追加の署名を送受信する必要があります。どのスプライストランザクションが新しいチャネル資金調達トランザクションになるか不明だからです。`start_batch` を用いて、保留中の各スプライストランザクションと現在の資金調達トランザクションに対する `commitment_signed` のバッチを送ります。`splice_locked` を送ったあとには、ピアがそれを受信する前に送り始めた古い `commitment_signed` のバッチが届く可能性がありますが、`funding_txid` でフィルタすることで安全に無視できます。
 
 ### 更新された状態への移行の完了：`revoke_and_ack`
 
@@ -1746,11 +2399,12 @@ HTLC のタイムアウトを設定しないノードは、チャネルの失敗
 
 #### 要件
 
-送信ノード：
-  - `per_commitment_secret` を、前のコミットメントトランザクションのキーを生成するために使用した秘密に設定しなければなりません。
-  - `next_per_commitment_point` を、次のコミットメントトランザクションの値に設定しなければなりません。
+送信ノード:
+  - `per_commitment_secret` を、前のコミットメントトランザクションの鍵を生成するのに使用した秘密に設定しなければなりません。
+  - `next_per_commitment_point` を、次のコミットメントトランザクション用の値に設定しなければなりません。
+  - `commitment_signed` のバッチに応答する場合でも、単一の `revoke_and_ack` メッセージのみを送信しなければなりません。
 
-受信ノード：
+受信ノード:
   - `per_commitment_secret` が有効な秘密鍵でない場合、または前の `per_commitment_point` を生成しない場合：
     - `error` を送信し、チャネルを失敗させなければなりません。
   - `per_commitment_secret` が [BOLT #3](03-transactions.md#per-commitment-secret-requirements) のプロトコルによって生成されていない場合：
@@ -1783,30 +2437,34 @@ Bitcoin 手数料を支払う責任があるノードは：
 Bitcoin 手数料を支払う責任がないノードは：
   - `update_fee` を送信しては *いけません* 。
 
-送信ノードは：
-  - `option_anchors` が交渉されていない場合：
-    - `update_fee` が `feerate_per_kw` を増加させる場合：
-      - 更新された `feerate_per_kw` でのリモートトランザクションのダストバランスが `max_dust_htlc_exposure_msat` を超える場合：
-        - `update_fee` を送信しない *かもしれません*
-        - チャネルを失敗させる *かもしれません*
-      - 更新された `feerate_per_kw` でのローカルトランザクションのダストバランスが `max_dust_htlc_exposure_msat` を超える場合：
-        - `update_fee` を送信しない *かもしれません*
-        - チャネルを失敗させる *かもしれません*
+送信ノード:
+  - `option_anchors` が交渉されていない場合:
+    - `update_fee` が `feerate_per_kw` を増加させる場合:
+      - 更新後の `feerate_per_kw` でリモートトランザクションのダストバランスが `max_dust_htlc_exposure_msat` を超える場合:
+        - `update_fee` を送信しなくてもよい (MAY NOT)。
+        - チャネルを失敗させてもよい (MAY)。
+      - 更新後の `feerate_per_kw` でローカルトランザクションのダストバランスが `max_dust_htlc_exposure_msat` を超える場合:
+        - `update_fee` を送信しなくてもよい (MAY NOT)。
+        - チャネルを失敗させてもよい (MAY)。
+  - スプライスが保留中の場合:
+    - すべてのコミットメントトランザクションについて要件を満たすことを保証しなければなりません。
 
-受信ノードは：
-  - `update_fee` が迅速な処理に対して低すぎる場合、または不当に大きい場合：
-    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させる *必要があります* 。
-  - 送信者が Bitcoin 手数料を支払う責任がない場合：
-    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させる *必要があります* 。
-  - 送信者が受信ノードの現在のコミットメントトランザクションで新しい手数料率を負担できない場合：
-    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させる *べき* です。
-      - ただし、このチェックを `update_fee` がコミットされるまで遅らせる *かもしれません* 。
-    - `option_anchors` が交渉されていない場合：
-      - `update_fee` が `feerate_per_kw` を増加させる場合：
-        - 更新された `feerate_per_kw` でのリモートトランザクションのダストバランスが `max_dust_htlc_exposure_msat` を超える場合：
-          - チャネルを失敗させる *かもしれません*
-      - 更新された `feerate_per_kw` でのローカルトランザクションのダストバランスが `max_dust_htlc_exposure_msat` を超える場合：
-          - チャネルを失敗させる *かもしれません*
+受信ノード:
+  - `update_fee` がタイムリーな処理に対して低すぎる、または不当に大きい場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 送信者が Bitcoin 手数料を支払う責任がない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させなければなりません。
+  - 送信者が、受信ノードの現在のコミットメントトランザクション上で新しい手数料率を負担できない場合:
+    - `warning` を送信して接続を閉じるか、`error` を送信してチャネルを失敗させるべきです。
+      - ただし、このチェックを `update_fee` がコミットされるまで遅延させてもよいです。
+    - `option_anchors` が交渉されていない場合:
+      - `update_fee` が `feerate_per_kw` を増加させる場合:
+        - 更新後の `feerate_per_kw` でリモートトランザクションのダストバランスが `max_dust_htlc_exposure_msat` を超える場合:
+          - チャネルを失敗させてもよい (MAY)。
+      - 更新後の `feerate_per_kw` でローカルトランザクションのダストバランスが `max_dust_htlc_exposure_msat` を超える場合:
+          - チャネルを失敗させてもよい (MAY)。
+  - スプライスが保留中の場合:
+    - すべてのコミットメントトランザクションについて要件を満たすことを保証しなければなりません。
 
 #### 根拠
 
@@ -1819,6 +2477,8 @@ Bitcoin 手数料を支払う責任がないノードは：
 現在、手数料は一方的です（チャネル作成を要求した側が常にコミットメントトランザクションの手数料を支払います）。そのため、手数料レベルを設定するのは簡単ですが、同じ手数料率が HTLC トランザクションにも適用されるため、受信ノードも手数料の妥当性を考慮する必要があります。
 
 オンチェーン手数料が増加し、コミットメントに多くの HTLC が含まれていて、更新された手数料率でトリムされる場合、設定された `max_dust_htlc_exposure_msat` を超える可能性があります。チャネルを事前にクローズするかどうかは、ノードのポリシーに委ねられています。
+
+スプライシングがサポートされている場合、コミットメントトランザクションが同時に複数存在することがあります。提案する変更はそれらすべてに対して妥当でなければなりません。
 
 ## メッセージの再送信
 
@@ -1840,11 +2500,28 @@ Bitcoin 手数料を支払う責任がないノードは：
 
 1. `tlv_stream`: `channel_reestablish_tlvs`
 2. types:
-    1. type: 0 (`next_funding`)
+    1. type: 1 (`next_funding`)
     2. data:
         * [`sha256`:`next_funding_txid`]
+        * [`byte`:`retransmit_flags`]
+    1. type: 5 (`my_current_funding_locked`)
+    2. data:
+        * [`sha256`:`my_current_funding_locked_txid`]
+        * [`byte`:`retransmit_flags`]
 
-`next_commitment_number`: コミットメント番号は各コミットメントトランザクションに対する 48 ビットのインクリメントカウンタです。カウンタはチャネル内の各ピアに対して独立しており、0 から始まります。再確立の場合を除いて、他のノードに明示的に中継されることはなく、それ以外の場合は暗黙的です。
+`next_commitment_number`: コミットメント番号は、各コミットメントトランザクションに対する 48 ビットのインクリメントカウンタです。カウンタはチャネル内のピアごとに独立しており、0 から始まります。再確立時を除き、もう一方のノードに明示的に伝えられることはなく、それ以外は暗黙的です。
+
+`next_funding.retransmit_flags` ビットフィールドは、再接続後に対応する `next_funding_txid` に対してピアが再送すべきメッセージを示します:
+
+| ビット位置 | 名前                |
+| ---------- | ------------------- |
+| 0          | `commitment_signed` |
+
+`my_current_funding_locked.retransmit_flags` ビットフィールドは、再接続後にピアに再送してほしいメッセージを示します:
+
+| ビット位置 | 名前                       |
+| ---------- | -------------------------- |
+| 0          | `announcement_signatures`  |
 
 ### 要件
 
@@ -1874,68 +2551,96 @@ Bitcoin 手数料を支払う責任がないノードは：
       - 各チャネルに対して `channel_reestablish` を送信しなければなりません。
       - そのチャネルの他のメッセージを送信する前に、他のノードの `channel_reestablish` メッセージを受信するのを待たなければなりません。
 
-送信ノード：
+送信ノード:
 
-- `next_commitment_number` を、次に受信することを期待する `commitment_signed` のコミットメント番号に設定しなければなりません。
-- `next_revocation_number` を、次に受信することを期待する `revoke_and_ack` メッセージのコミットメント番号に設定しなければなりません。
+- `next_commitment_number` を、次に受信を期待する `commitment_signed` のコミットメント番号に設定しなければなりません。
+- `next_revocation_number` を、次に受信を期待する `revoke_and_ack` メッセージのコミットメント番号に設定しなければなりません。
 - `my_current_per_commitment_point` を有効なポイントに設定しなければなりません。
-- `next_revocation_number` が 0 に等しい場合：
+- `next_revocation_number` が 0 に等しい場合:
   - `your_last_per_commitment_secret` をすべてゼロに設定しなければなりません。
-- それ以外の場合：
-  - 受信した最後の `per_commitment_secret` に `your_last_per_commitment_secret` を設定しなければなりません。
-- インタラクティブなトランザクション構築のために `commitment_signed` を送信したが、`tx_signatures` を受信していない場合：
-  - そのインタラクティブなトランザクションの txid に `next_funding_txid` を設定しなければなりません。
-- それ以外の場合：
-  - `next_funding_txid` を設定してはなりません。
+- それ以外の場合:
+  - `your_last_per_commitment_secret` を、自身が受信した最後の `per_commitment_secret` に設定しなければなりません。
+- interactive-tx 構築のために `commitment_signed` を送信したが、`tx_signatures` を受信していない場合:
+  - `next_funding` TLV を含めなければなりません。
+  - `next_funding_txid` をその interactive-tx の txid に設定しなければなりません。
+  - その `next_funding_txid` に対する `commitment_signed` をまだ受信していない場合:
+    - `retransmit_flags` の `commitment_signed` ビットを立てなければなりません。
+- それ以外の場合:
+  - `next_funding` TLV を含めてはなりません。
+- `option_splice` が交渉されている場合:
+  - 切断中にスプライストランザクションが許容できる深さに達した場合:
+    - その最新のトランザクションの txid を入れた `my_current_funding_locked` を含めなければなりません。
+  - そうでなく、すでに何らかのトランザクションについて `splice_locked` を送信していた場合:
+    - 直近に送信した `splice_locked` の txid を入れた `my_current_funding_locked` を含めなければなりません。
+  - そうでなく、すでに `channel_ready` を送信している場合:
+    - チャネルの資金調達トランザクションの txid を入れた `my_current_funding_locked` を含めなければなりません。
+  - そうでない (まだ `channel_ready` も `splice_locked` も送信していない) 場合:
+    - `my_current_funding_locked` を含めてはなりません。
+  - `my_current_funding_locked` を含める場合:
+    - このチャネルで `announce_channel` が設定されている場合:
+      - 該当トランザクションに対する `announcement_signatures` をまだ受信していない場合:
+        - `retransmit_flags` の `announcement_signatures` ビットを `1` にしなければなりません。
+    - そうでない場合:
+      - `retransmit_flags` の `announcement_signatures` ビットを `0` にしなければなりません。
 
-ノード：
+ノード:
 
-- 送信および受信した `channel_reestablish` の両方で `next_commitment_number` が 1 の場合：
-  - `channel_ready` を再送信しなければなりません。
-- それ以外の場合：
-  - `channel_ready` を再送信してはなりませんが、異なる `short_channel_id` の `alias` フィールドを持つ `channel_ready` を送信してもかまいません。
-- 再接続時：
-  - 受信した冗長な `channel_ready` を無視しなければなりません。
-- `next_commitment_number` が受信ノードが最後に送信した `commitment_signed` メッセージのコミットメント番号に等しい場合：
-  - 次の `commitment_signed` に同じコミットメント番号を再利用しなければなりません。
-- それ以外の場合：
-  - `next_commitment_number` が受信ノードが最後に送信した `commitment_signed` メッセージのコミットメント番号より 1 大きくない場合：
-    - `error` を送信し、チャネルを失敗させるべきです。
-  - `commitment_signed` を送信しておらず、かつ `next_commitment_number` が 1 に等しくない場合：
-    - `error` を送信し、チャネルを失敗させるべきです。
-- `next_revocation_number` が受信ノードが送信した最後の `revoke_and_ack` のコミットメント番号に等しく、かつ受信ノードがまだ `closing_signed` を受信していない場合：
-  - `revoke_and_ack` を再送信しなければなりません。
-  - 以前に再送信が必要な `commitment_signed` を送信している場合：
-    - `revoke_and_ack` と `commitment_signed` を最初に送信したのと同じ相対順序で再送信しなければなりません。
-- それ以外の場合：
-  - `next_revocation_number` が受信ノードが送信した最後の `revoke_and_ack` のコミットメント番号より 1 大きくない場合：
-    - `error` を送信し、チャネルを失敗させるべきです。
-  - `revoke_and_ack` を送信しておらず、かつ `next_revocation_number` が 0 に等しくない場合：
-    - `error` を送信し、チャネルを失敗させるべきです。
+- `next_commitment_number` が 0 の場合:
+  - 直ちにチャネルを失敗させ、関連する最新コミットメントトランザクションをブロードキャストしなければなりません。
+- 送信した `channel_reestablish` および受信した `channel_reestablish` の両方で `next_commitment_number` が 1 であり、いずれの `channel_reestablish` にもスプライストランザクションに対する `my_current_funding_locked` または `next_funding` が含まれていない場合:
+  - `channel_ready` を再送しなければなりません。
+- それ以外の場合:
+  - `channel_ready` を再送してはなりませんが、異なる `short_channel_id` `alias` フィールドを持つ `channel_ready` を送信してもよいです。
+- 再接続時:
+  - 冗長な `channel_ready` を受信した場合は無視しなければなりません。
+- `next_commitment_number` が受信ノードが最後に送信した `commitment_signed` メッセージのコミットメント番号と等しい場合:
+  - 次の `commitment_signed` には同じコミットメント番号を再利用しなければなりません。
+- それ以外の場合:
+  - `next_commitment_number` が、受信ノードが次に送る `commitment_signed` のコミットメント番号と等しくない場合:
+    - `error` を送信してチャネルを失敗させるべきです。
+- `next_revocation_number` が受信ノードが送信した最後の `revoke_and_ack` のコミットメント番号と等しく、かつ受信ノードがまだ `closing_signed` を受信していない場合:
+  - `revoke_and_ack` を再送しなければなりません。
+  - 以前に再送が必要な `commitment_signed` を送信している場合:
+    - `revoke_and_ack` と `commitment_signed` を、最初に送信したのと同じ相対順序で再送しなければなりません。
+- それ以外の場合:
+  - `next_revocation_number` が、受信ノードが送信した最後の `revoke_and_ack` のコミットメント番号より 1 大きくない場合:
+    - `error` を送信してチャネルを失敗させるべきです。
+  - `revoke_and_ack` を送信しておらず、かつ `next_revocation_number` が 0 と等しくない場合:
+    - `error` を送信してチャネルを失敗させるべきです。
 
+受信ノード:
 
-受信ノード：
+- `my_current_per_commitment_point` は無視しなければなりませんが、有効なポイントであることを要求してもよいです。
+- `next_revocation_number` が上記の期待値より大きく、かつ `your_last_per_commitment_secret` がその `next_revocation_number` から 1 を引いた値に対して正しい場合:
+  - 自身のコミットメントトランザクションをブロードキャストしてはなりません。
+  - ピアにチャネルを失敗させるよう要求する `error` を送信すべきです。
+- それ以外の場合:
+  - `your_last_per_commitment_secret` が期待値と一致しない場合:
+    - `error` を送信してチャネルを失敗させるべきです。
 
-- `my_current_per_commitment_point` を無視しなければなりませんが、有効なポイントであることを要求してもかまいません。
-- `next_revocation_number` が上記で予想される値より大きく、かつ `your_last_per_commitment_secret` がその `next_revocation_number` マイナス 1 に対して正しい場合：
-  - コミットメントトランザクションをブロードキャストしてはなりません。
-  - ピアにチャネルを失敗させるよう要求する `error` を送信するべきです。
-- それ以外の場合：
-  - `your_last_per_commitment_secret` が予想される値と一致しない場合：
-    - `error` を送信し、チャネルを失敗させるべきです。
+受信ノード:
 
-受信ノード：
+- `next_funding` TLV が設定されている場合:
+  - `next_funding_txid` が最新の interactive-tx 資金調達トランザクションと一致する場合:
+    - そのトランザクションに対する `tx_signatures` をまだ受信していない場合:
+      - `retransmit_flags` の `commitment_signed` ビットが立っている場合:
+        - そのトランザクションに対する `commitment_signed` を再送しなければなりません。
+      - すでに `commitment_signed` を受信しており、[`tx_signatures` の要件](#the-tx_signatures-message) に従って先に署名すべき場合:
+        - そのトランザクションに対する `tx_signatures` を送信しなければなりません。
+    - すでにそのトランザクションに対する `tx_signatures` を受信している場合:
+      - そのトランザクションに対する `tx_signatures` を送信しなければなりません。
+  - 自身も `channel_reestablish` で `next_funding` を設定したが、値が一致しない場合:
+    - `error` を送信してチャネルを失敗させなければなりません。
+  - それ以外の場合:
+    - 送信ノードがこのトランザクションを忘れてよいと知らせるため、`tx_abort` を送信しなければなりません。
 
-- `next_funding_txid` が設定されている場合：
-  - `next_funding_txid` が最新のインタラクティブファンディングトランザクションと一致する場合：
-    - そのファンディングトランザクションに対する `tx_signatures` をまだ受け取っていない場合：
-      - そのファンディングトランザクションに対する `commitment_signed` を再送信しなければなりません。
-      - すでに `commitment_signed` を受け取っており、[`tx_signatures` の要件](#the-tx_signatures-message)に従って最初に署名すべき場合：
-        - そのファンディングトランザクションに対する `tx_signatures` を送信しなければなりません。
-    - すでにそのファンディングトランザクションに対する `tx_signatures` を受け取っている場合：
-      - そのファンディングトランザクションに対する `tx_signatures` を送信しなければなりません。
-  - それ以外の場合：
-    - 送信ノードにこのファンディングトランザクションを忘れることができることを知らせるために `tx_abort` を送信しなければなりません。
+受信ノード:
+
+- 保留中のスプライストランザクションがあり、`my_current_funding_locked` がそのいずれかと一致しており、まだそのトランザクションに対する `splice_locked` を受信していない場合:
+  - その `txid` に対する `splice_locked` を受信したかのように `my_current_funding_locked` を処理しなければなりません。
+- `my_current_funding_locked` が含まれており、`retransmit_flags` の `announcement_signatures` ビットが立っている場合:
+  - このチャネルで `announce_channel` が設定されており、対応するスプライストランザクションに対する `announcement_signatures` を送信できる状態の場合:
+    - `announcement_signatures` を再送しなければなりません。
 
 ノード：
 
@@ -1949,13 +2654,13 @@ Bitcoin 手数料を支払う責任がないノードは：
 
 ### 理論的根拠
 
-上記の要件は、オープニングフェーズがほぼアトミックであることを保証します。完了しない場合は、再度開始します。唯一の例外は、`funding_signed` メッセージが送信されたが受信されなかった場合です。この場合、ファンダーはチャネルを忘れ、再接続時に新しいチャネルを開くと推測されます。一方、他のノードは、`channel_ready` を受信しないか、オンチェーンでファンディングトランザクションを確認しないため、最終的に元のチャネルを忘れることになります。
+上記の要件は、オープニングフェーズがほぼアトミックであることを保証します。完了しない場合は、再度開始します。唯一の例外は、`funding_signed` メッセージが送信されたが受信されなかった場合です。この場合、ファンダーはチャネルを忘れ、再接続時に新しいチャネルを開くと推測されます。一方、他のノードは、`channel_ready` を受信しないか、オンチェーンで資金調達トランザクションを確認しないため、最終的に元のチャネルを忘れることになります。
 
 `error` には確認応答がないため、再接続が発生した場合には、再度切断する前に再送信するのが礼儀です。ただし、ノードがチャネルを完全に忘れてしまう場合もあるため、必須ではありません。
 
 `closing_signed` も確認応答がないため、再接続時には再送信しなければなりません（ただし、再接続時には交渉が再開されるため、完全に同じ再送信である必要はありません）。`shutdown` の唯一の確認応答は `closing_signed` なので、どちらか一方を再送信する必要があります。
 
-更新の処理も同様にアトミックです。コミットが確認されない（または送信されなかった）場合、更新は再送信されます。ただし、同一であることは求められません。異なる順序であったり、異なる手数料が関与したり、追加するには古すぎる HTLC が欠けている場合もあります。同一であることを要求すると、送信者が送信のたびにディスクに書き込むことを意味しますが、ここでのスキームは、送信または受信された各 `commitment_signed` に対して単一の永続的なディスクへの書き込みを推奨します。しかし、`commitment_signed` と `revoke_and_ack` の両方を再送信する必要がある場合、これら二つの相対的な順序は保持されなければなりません。さもないと、チャネルの閉鎖につながります。
+更新の取り扱いも同様にアトミックです。コミットが確認されない (または送られなかった) 場合、更新は再送されます。ただし同一である必要はなく、異なる順序であったり、別の手数料が伴ったり、追加するには古すぎる HTLC が欠けていたりしてもかまいません。同一性を要求してしまうと、送信のたびに送信者のディスク書き込みが必要になりますが、本仕様の方式は送受信される各 `commitment_signed` ごとに 1 回の永続化書き込みで済ませることを意図しています。ただし `commitment_signed` と `revoke_and_ack` を両方とも再送する必要がある場合は、両者の相対順序を保たなければなりません。さもないとチャネルクローズに繋がります。
 
 `closing_signed` を受信した後に `revoke_and_ack` の再送信を要求されることは決してありません。これは、シャットダウンが完了したことを意味し、それはリモートノードが `revoke_and_ack` を受信した後にのみ発生するからです。
 
@@ -1968,7 +2673,9 @@ Bitcoin 手数料を支払う責任がないノードは：
 
 ノードが何らかの理由で遅れてしまった場合（例えば、古いバックアップから復元された場合など）、遅れていることを検出することができます。遅れているノードは、自分の現在のコミットメントトランザクションをブロードキャストできないことを知っておく必要があります。これを行うと、リモートノードが取り消しプレイメージを知っていることを証明できるため、資金の全損につながります。遅れているノードから返される `error` は、他のノードが現在のコミットメントトランザクションをチェーンにドロップするように促すべきです。他のノードは、その `error` を待って、遅れているノードがまず状態を修正する機会を与えるべきです（例えば、異なるバックアップで再起動することによって）。
 
-`next_funding_txid` は、ピアがインタラクティブなトランザクション構築の署名ステップを最終化することを可能にするか、またはピアの一方が署名していない場合にそのトランザクションを安全に中止することを可能にします。この場合、そのトランザクションはすでに状態から削除されています。
+`next_funding` TLV は、ピアが interactive-tx 構築の署名ステップを最終化したり、いずれかのピアがそのトランザクションを署名せずに状態から既に削除している場合に安全に中止したりすることを可能にします。
+
+`my_current_funding_locked` は `splice_locked` の送信と等価ですが、`channel_reestablish` の中でアトミックに処理されます (`splice_locked` メッセージの再送を要求する代わりです)。これはチャネル更新とのレース条件を避けるのに役立ちます (詳しい例は [この例](./bolt02/splicing-test.md#disconnection-with-concurrent-splice_locked) を参照してください)。`splice_locked` メッセージが切断中に失われた場合や、ピアの切断中にスプライストランザクションが許容できる深さに達した場合にも対応できます。また、最新のスプライストランザクションに対する `announcement_signatures` メッセージが切断前に届いていなかった場合に再送を要求することもできます。
 
 # Authors
 
