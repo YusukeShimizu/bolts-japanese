@@ -1,4 +1,4 @@
-# BOLT #12: Flexible Protocol for Lightning Payments
+# BOLT #12: Negotiation Protocol for Lightning Payments
 
 # Table of Contents
 
@@ -240,6 +240,7 @@ A writer of an offer:
     - SHOULD omit `offer_chains`, implying that bitcoin is only chain.
   - if a specific minimum `offer_amount` is required for successful payment:
     - MUST set `offer_amount` to the amount expected (per item).
+    - MUST set `offer_amount` greater than zero.
     - if the currency for `offer_amount` is that of all entries in `chains`:
       - MUST specify `offer_amount` in multiples of the minimum lightning-payable unit
         (e.g. milli-satoshis for bitcoin).
@@ -295,9 +296,11 @@ A reader of an offer:
     - if the node does not accept bitcoin invoices:
       - MUST NOT respond to the offer
   - otherwise: (`offer_chains` is set):
-    - if the node does not accept invoices for any of the `chains`:
+    - if the node does not accept invoices for at least one of the `chains`:
       - MUST NOT respond to the offer
   - if `offer_amount` is set and `offer_description` is not set:
+    - MUST NOT respond to the offer.
+  - if `offer_amount` is set and is not greater than zero:
     - MUST NOT respond to the offer.
   - if `offer_currency` is set and `offer_amount` is not set:
     - MUST NOT respond to the offer.
@@ -347,6 +350,12 @@ useful in a system which bases it on available stock.  It would be
 painful to have to special-case the "only one left" offer generation.
 
 Offers can be used to simply send money without expecting anything in return (tips, kudos, donations, etc), which means the description field is optional (the `offer_issuer` field is very useful for this case!); if you are charging for something specific, the description is vital for the user to know what it was they paid for.
+
+An empty `offer_chains` (present but with zero entries) is explicitly invalid
+because it would make invoice requests impossible. The payer cannot set
+`invreq_chain` to "one of `offer_chains`" when there are no chains listed.
+Rejecting such offers early provides clear feedback rather than leaving
+implementations to fail at the invoice request stage.
 
 # Invoice Requests
 
@@ -437,6 +446,12 @@ while still allowing signature validation.
     1. type: 90 (`invreq_paths`)
     2. data:
         * [`...*blinded_path`:`paths`]
+    1. type: 91 (`invreq_bip_353_name`)
+    2. data:
+        * [`u8`:`name_len`]
+        * [`name_len*byte`:`name`]
+        * [`u8`:`domain_len`]
+        * [`domain_len*byte`:`domain`]
     1. type: 240 (`signature`)
     2. data:
         * [`bip340sig`:`sig`]
@@ -481,6 +496,10 @@ The writer:
         (e.g. milli-satoshis for bitcoin) for `invreq_chain` (or for bitcoin, if there is no `invreq_chain`).
   - if it supports bolt12 invoice request features:
     - MUST set `invreq_features`.`features` to the bitmap of features.
+  - if it received the offer from which it constructed this `invoice_request` using BIP 353 resolution:
+    - MUST include `invreq_bip_353_name` with,
+      - `name` set to the post-₿, pre-@ part of the BIP 353 HRN,
+      - `domain` set to the post-@ part of the BIP 353 HRN.
 
 The reader:
   - MUST reject the invoice request if `invreq_payer_id` or `invreq_metadata` are not present.
@@ -530,7 +549,9 @@ The reader:
     - MUST reject the invoice request if bitcoin is not a supported chain.
   - otherwise:
     - MUST reject the invoice request if `invreq_chain`.`chain` is not a supported chain.
-
+  - if `invreq_bip_353_name` is present:
+    - MUST reject the invoice request if `name` or `domain` contain any bytes which are not
+      `0`-`9`, `a`-`z`, `A`-`Z`, `-`, `_` or `.`.
 
 ## Rationale
 
@@ -626,6 +647,12 @@ the `onion_message` `invoice` field.
     1. type: 90 (`invreq_paths`)
     2. data:
         * [`...*blinded_path`:`paths`]
+    1. type: 91 (`invreq_bip_353_name`)
+    2. data:
+        * [`u8`:`name_len`]
+        * [`name_len*byte`:`name`]
+        * [`u8`:`domain_len`]
+        * [`domain_len*byte`:`domain`]
     1. type: 160 (`invoice_paths`)
     2. data:
         * [`...*blinded_path`:`paths`]

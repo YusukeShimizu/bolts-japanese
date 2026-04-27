@@ -17,6 +17,7 @@ This details the exact format of on-chain transactions, which both sides need to
           * [Received HTLC Outputs](#received-htlc-outputs)
         * [Trimmed Outputs](#trimmed-outputs)
     * [HTLC-timeout and HTLC-success Transactions](#htlc-timeout-and-htlc-success-transactions)
+    * [Legacy Closing Transaction](#legacy-closing-transaction)
 	* [Closing Transaction](#closing-transaction)
     * [Fees](#fees)
         * [Fee Calculation](#fee-calculation)
@@ -26,7 +27,8 @@ This details the exact format of on-chain transactions, which both sides need to
     * [Commitment Transaction Construction](#commitment-transaction-construction)
   * [Keys](#keys)
     * [Key Derivation](#key-derivation)
-        * [`localpubkey`, `remotepubkey`, `local_htlcpubkey`, `remote_htlcpubkey`, `local_delayedpubkey`, and `remote_delayedpubkey` Derivation](#localpubkey-remotepubkey-local_htlcpubkey-remote_htlcpubkey-local_delayedpubkey-and-remote_delayedpubkey-derivation)
+        * [`localpubkey`, `local_htlcpubkey`, `remote_htlcpubkey`, `local_delayedpubkey`, and `remote_delayedpubkey` Derivation](#localpubkey-local_htlcpubkey-remote_htlcpubkey-local_delayedpubkey-and-remote_delayedpubkey-derivation)
+        * [`remotepubkey` Derivation](#remotepubkey-derivation)
         * [`revocationpubkey` Derivation](#revocationpubkey-derivation)
         * [Per-commitment Secret Requirements](#per-commitment-secret-requirements)
     * [Efficient Per-commitment Secret Storage](#efficient-per-commitment-secret-storage)
@@ -137,8 +139,7 @@ The output is spent by an input with `nSequence` field set to `1` and witness:
 
     <remote_sig>
 
-Otherwise, this output is a simple P2WPKH to `remotepubkey`. Note: the remote's commitment transaction uses your `localpubkey` for their
-`to_remote` output to yourself.
+Otherwise, this output is a simple P2WPKH to `remotepubkey`.
 
 #### `to_local_anchor` and `to_remote_anchor` Output (option_anchors)
 
@@ -279,11 +280,15 @@ To redeem the HTLC, the HTLC-success transaction is used as detailed below. This
 ### Trimmed Outputs
 
 Each peer specifies a `dust_limit_satoshis` below which outputs should
-not be produced; these outputs that are not produced are termed "trimmed". A trimmed output is
-considered too small to be worth creating and is instead added
-to the commitment transaction fee. For HTLCs, it needs to be taken into
-account that the second-stage HTLC transaction may also be below the
-limit.
+not be produced; these outputs that are not produced are termed "trimmed".
+A trimmed output is considered too small to be worth creating: it is instead
+either added to the commitment transaction fee.
+
+For HTLCs, it needs to be taken into account that the second-stage HTLC
+transaction may also be below the limit. Note that when using `option_anchors`,
+HTLC transactions don't include a fee and thus don't contribute to trimming:
+setting a higher `dust_limit_satoshis` makes sense for those channels to ensure
+that outputs are economical to spend.
 
 #### Requirements
 
@@ -349,7 +354,9 @@ The witness script for the output is:
 
 To spend this via penalty, the remote node uses a witness stack `<revocationsig> 1`, and to collect the output, the local node uses an input with nSequence `to_self_delay` and a witness stack `<local_delayedsig> 0`.
 
-## Closing Transaction
+## Legacy Closing Transaction
+
+This variant is used for `closing_signed` messages (i.e. where `option_simple_close` is not negotiated).
 
 Note that there are two possible variants for each node.
 
@@ -389,6 +396,41 @@ has been used.
 
 There will be at least one output, if the funding amount is greater
 than twice `dust_limit_satoshis`.
+
+## Closing Transaction
+
+This variant is used for `closing_complete` and `closing_sig` messages (i.e. where `option_simple_close` is negotiated).
+
+In this case, the node sending `closing_complete` ("the closer") pays the fees.
+The outputs are ordered as detailed in [Transaction Output Ordering](#transaction-output-ordering).
+
+The side with lesser funds can opt to omit their own output.
+
+* version: 2
+* locktime: `locktime` from the `closing_complete` message
+* txin count: 1
+   * `txin[0]` outpoint: `txid` and `output_index` of the channel output
+   * `txin[0]` sequence: 0xFFFFFFFD
+   * `txin[0]` script bytes: 0
+   * `txin[0]` witness: `0 <signature_for_pubkey1> <signature_for_pubkey2>`
+* txout count: 1 or 2
+  * The closer output:
+    * `txout` amount:
+      * 0 if the `scriptpubkey` starts with `OP_RETURN`
+      * otherwise the final balance for the closer, minus `closing_complete.fee_satoshis`, rounded down to whole satoshis
+	* `txout` script: as specified in `closer_scriptpubkey` from the `closing_complete` message
+  * The closee output:
+    * `txout` amount:
+      * 0 if the `scriptpubkey` starts with `OP_RETURN`
+      * otherwise the final balance for the closee, rounded down to whole satoshis
+	* `txout` script: as specified in `closee_scriptpubkey` from the `closing_complete` message
+
+### Requirements
+
+Each node offering a signature:
+  - MUST round each output down to whole satoshis.
+  - MUST subtract the fee given by `fee_satoshis` from the closer output.
+  - MUST set the output amount to 0 if the `scriptpubkey` is `OP_RETURN`.
 
 ## Fees
 
@@ -512,13 +554,29 @@ Bitcoin Core defines the following dust thresholds:
 - pay to script hash (p2sh): 540 satoshis
 - pay to witness pubkey hash (p2wpkh): 294 satoshis
 - pay to witness script hash (p2wsh): 330 satoshis
+- pay to anchor (p2a): 240 satoshis
 - unknown segwit versions: 354 satoshis
+- `OP_RETURN` outputs: these are never dust
 
 The rationale of this calculation (implemented [here](https://github.com/bitcoin/bitcoin/blob/2aff9a36c352640a263e8b5de469710f7e80eb54/src/policy/policy.cpp#L28))
 is explained in the following sections.
 
 In all these sections, the calculations are done with a feerate of 3000 sat/kB
 as per Bitcoin Core's implementation.
+
+Note that since the introduction of `option_anchors`, the second-stage HTLC
+transaction's weight is not taken into account when deciding whether outputs
+should be included in the commitment transaction or not. It thus makes sense
+to use a `dust_limit_satoshis` that takes into account the cost of those
+second-stage HTLC transactions, to ensure that outputs added to the commitment
+transaction can actually be claimed on-chain, otherwise they may pollute the
+utxo set indefinitely. At a minimum, nodes should allow their peer to use a
+`dust_limit_satoshis` that is higher than the values defined by Bitcoin Core.
+We cannot predict future feerates, so this will not always work and can still
+result in HTLC outputs that are unspendable if the on-chain fees are too high.
+We cannot use very large `dust_limit_satoshis` values either since it would
+create too much dust exposure in the commitment transaction (more details
+[here](/02-peer-protocol.md#bounding-exposure-to-trimmed-in-flight-htlcs-max_dust_htlc_exposure_msat)).
 
 ### Pay to pubkey hash (p2pkh)
 
@@ -996,8 +1054,8 @@ The *expected weight* of an HTLC transaction is calculated as follows:
         - OP_IF: 1 byte
         - OP_CHECKSIG: 1 byte
         - OP_ELSE: 1 byte
-        - OP_DATA: 1 byte (remotepubkey length)
-        - remotepubkey: 33 bytes
+        - OP_DATA: 1 byte (remote_htlcpubkey length)
+        - remote_htlcpubkey: 33 bytes
         - OP_SWAP: 1 byte
         - OP_SIZE: 1 byte
         - OP_DATA: 1 byte (32 length)
@@ -1010,8 +1068,8 @@ The *expected weight* of an HTLC transaction is calculated as follows:
         - OP_EQUALVERIFY: 1 byte
         - 2: 1 byte
         - OP_SWAP: 1 byte
-		- OP_DATA: 1 byte (localpubkey length)
-		- localpubkey: 33 bytes
+		- OP_DATA: 1 byte (local_htlcpubkey length)
+		- local_htlcpubkey: 33 bytes
         - 2: 1 byte
         - OP_CHECKMULTISIG: 1 byte
         - OP_ELSE: 1 byte
@@ -1036,8 +1094,8 @@ The *expected weight* of an HTLC transaction is calculated as follows:
         - OP_IF: 1 byte
         - OP_CHECKSIG: 1 byte
         - OP_ELSE: 1 byte
-		- OP_DATA: 1 byte (remotepubkey length)
-		- remotepubkey: 33 bytes
+		- OP_DATA: 1 byte (remote_htlcpubkey length)
+		- remote_htlcpubkey: 33 bytes
 		- OP_SWAP: 1 byte
 		- OP_SIZE: 1 byte
 		- OP_DATA: 1 byte (32 length)
@@ -1047,8 +1105,8 @@ The *expected weight* of an HTLC transaction is calculated as follows:
 		- OP_DROP: 1 byte
 		- 2: 1 byte
 		- OP_SWAP: 1 byte
-		- OP_DATA: 1 byte (localpubkey length)
-		- localpubkey: 33 bytes
+		- OP_DATA: 1 byte (local_htlcpubkey length)
+		- local_htlcpubkey: 33 bytes
 		- 2: 1 byte
 		- OP_CHECKMULTISIG: 1 byte
 		- OP_ELSE: 1 byte

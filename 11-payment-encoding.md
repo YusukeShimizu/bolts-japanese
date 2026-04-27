@@ -98,24 +98,27 @@ whatever is being offered in return.
 The `p` multiplier would allow to specify sub-millisatoshi amounts, which cannot be transferred on the network, since HTLCs are denominated in millisatoshis.
 Requiring a trailing `0` decimal ensures that the `amount` represents an integer number of millisatoshis.
 
+Note that non-largest multipliers have been encountered in the wild, and as
+such invoice parsers should handle them.
+
 # Data Part
 
 The data part of a Lightning invoice consists of multiple sections:
 
 1. `timestamp`: seconds-since-1970 (35 bits, big-endian)
 1. zero or more tagged parts
-1. `signature`: Bitcoin-style signature of above (520 bits)
+1. `signature`: compact ECDSA/secp256k1 signature of the above (520 bits: 64-byte R||S + 1-byte recovery id)
 
 ## Requirements
 
 A writer:
   - MUST set `timestamp` to the number of seconds since Midnight 1 January 1970, UTC in
   big-endian.
-  - MUST set `signature` to a valid 512-bit secp256k1 signature of the SHA2 256-bit hash of the
-  human-readable part, represented as UTF-8 bytes, concatenated with the
-  data part (excluding the signature) with 0 bits appended to pad the
-  data to the next byte boundary, with a trailing byte containing
-  the recovery ID (0, 1, 2, or 3).
+  - MUST set `signature` to a valid compact ECDSA signature over secp256k1 of the SHA-256
+  hash of: the human-readable part (as UTF-8 bytes) concatenated with the data part
+  (excluding the signature), with 0 bits appended to pad to a byte boundary.
+  The signature is encoded as 64 bytes (R || S), followed by a trailing 1-byte
+  recovery id in {0,1,2,3}.
 
 A reader:
   - MUST check that the `signature` is valid (see the `n` tagged field specified below).
@@ -176,12 +179,12 @@ A writer:
         - SHOULD use a complete description of the purpose of the payment.
   - MAY include one `x` field.
     - if `x` is included:
-      - SHOULD use the minimum `data_length` possible.
+      - MUST use the minimum `data_length` possible, i.e. no leading 0 field-elements.
   - SHOULD include one `c` field (`min_final_cltv_expiry_delta`).
     - MUST set `c` to the minimum `cltv_expiry` it will accept for the last
     HTLC in the route.
-    - SHOULD use the minimum `data_length` possible.
-  - MAY include one `n` field. (Otherwise performing signature recovery is required)
+    - MUST use the minimum `data_length` possible, i.e. no leading 0 field-elements.
+  - MAY include one `n` field. (Otherwise performing public-key recovery is required)
     - MUST set `n` to the public key used to create the `signature`.
   - MAY include one or more `f` fields.
     - for Bitcoin payments:
@@ -197,7 +200,8 @@ A writer:
         specified in [BOLT #7](07-routing-gossip.md#the-channel_update-message).
     - MAY include more than one `r` field to provide multiple routing options.
   - if `9` contains non-zero bits:
-    - SHOULD use the minimum `data_length` possible.
+    - MUST use the minimum `data_length` possible to encode the non-zero bits
+      with no 0 field-elements at the start.
   - otherwise:
     - MUST omit the `9` field altogether.
   - MUST pad field data to a multiple of 5 bits, using 0s.
@@ -205,8 +209,9 @@ A writer:
     - MUST specify the most-preferred field first, followed by less-preferred fields, in order.
 
 A reader:
-  - MUST skip over unknown fields, OR an `f` field with unknown `version`, OR  `p`, `h`, `s` or
-  `n` fields that do NOT have `data_length`s of 52, 52, 52 or 53, respectively.
+  - MUST skip over `f` fields that use an unknown `version`.
+  - MUST fail the payment if any field with fixed `data_length` (`p`, `h`, `s`, `n`) does not have the correct length (52, 52, 52, 53).
+  - MUST fail the payment if neither a `d` field nor a `h` field is present, or if both are present.
   - if the `9` field contains unknown _odd_ bits that are non-zero:
     - MUST ignore the bit.
   - if the `9` field contains unknown _even_ bits that are non-zero:
@@ -215,36 +220,40 @@ A reader:
   - MUST check that the SHA2 256-bit hash in the `h` field exactly matches the hashed
   description.
   - if a valid `n` field is provided:
-    - MUST use the `n` field to validate the signature instead of performing signature recovery.
-  - if there is a valid `s` field:
-    - MUST use that as [`payment_secret`](04-onion-routing.md#tlv_payload-payload-format)
+    - MUST use the `n` field to validate the signature instead of performing public-key recovery.
+    - If the signature is not compliant with the low-S standard rule<sup>[low-S](https://github.com/bitcoin/bitcoin/pull/6769)</sup>:
+      - MUST fail the payment
+  - otherwise:
+    - MUST perform ECDSA public-key recovery and accept both high-S and low-S signatures.
+  - if a valid `s` field is not provided:
+    - MUST fail the payment.
+  - otherwise:
+    - MUST use the `s` field as [`payment_secret`](04-onion-routing.md#tlv_payload-payload-format)
   - if the `c` field (`min_final_cltv_expiry_delta`) is not provided:
     - MUST use an expiry delta of at least 18 when making the payment
   - if an `m` field is provided:
     - MUST use that as [`payment_metadata`](04-onion-routing.md#tlv_payload-payload-format)
+  - if a `c`, `x`, or `9` field is provided which has a non-minimal `data_length`
+    (i.e. begins with 0 field elements):
+    - SHOULD treat the invoice as invalid.
+
+
 ### Rationale
 
 The type-and-length format allows future extensions to be backward
 compatible. `data_length` is always a multiple of 5 bits, for easy
-encoding and decoding. Readers also ignore fields of different length,
-for fields that are expected may change.
-
-The `p` field supports the current 256-bit payment hash, but future
-specs could add a new variant of different length: in which case,
-writers could support both old and new variants, and old readers would
-ignore the variant not the correct length.
+encoding and decoding.
 
 The `d` field allows inline descriptions, but may be insufficient for
 complex orders. Thus, the `h` field allows a summary: though the method
 by which the description is served is as-yet unspecified and will
-probably be transport dependent. The `h` format could change in the future,
-by changing the length, so readers ignore it if it's not 256 bits.
+probably be transport dependent.
 
 The `m` field allows metadata to be attached to the payment. This supports
 applications where the recipient doesn't keep any context for the payment.
 
 The `n` field can be used to explicitly specify the destination node ID,
-instead of requiring signature recovery.
+instead of requiring public-key recovery.
 
 The `x` field gives warning as to when a payment will be
 refused: mainly to avoid confusion. The default was chosen
@@ -343,7 +352,7 @@ A payer:
       understands for payment.
   - MAY use the sequence of channels, specified by the `r` field, to route to the payee.
   - SHOULD consider the fee amount and payment timeout before initiating payment.
-  - SHOULD use the first `p` field that it did NOT skip as the payment hash.
+  - SHOULD use the first `p` field as the payment hash.
 
 A payee:
   - after the `timestamp` plus `expiry` has passed:
@@ -357,6 +366,7 @@ https://github.com/rustyrussell/lightning-payencode
 
 NB: all the following examples are signed with `priv_key`=`e126f68f7eafcc8b74f54d269fe206be715000f94dac067d1c04a8ca3b2db734`.
 All invoices contain a `payment_secret`=`1111111111111111111111111111111111111111111111111111111111111111` unless otherwise noted.
+Signatures are deterministic and generated using RFC6979 (using HMAC-SHA256). Note that even though using a `low R` would save 1 byte in the DER-encoded signature (by avoiding the need for a leading zero byte when the most significant bit is set), it is not enforced in this specification.
 
 > ### Please make a donation of any amount using payment_hash 0001020304050607080900010203040506070809000102030405060708090102 to me @03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad
 > lnbc1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaq9qrsgq357wnc5r2ueh7ck6q93dj32dlqnls087fxdwk8qakdyafkq3yap9us6v52vjjsrvywa6rt52cm9r9zqt8r2t7mlcwspyetp5h2tztugp9lfyql
@@ -601,6 +611,30 @@ Breakdown:
   * `6c6e626332306d0b25fe64500d044444444444444444444444444444444444444444444444444444444444444442e1a1c92db7b3f161a001b7689049eea2701b46f8db7513629edf2408fac7eaedc608043400010203040506070809000102030405060708090001020304050607080901020486a01863143c14c5166804bd19203356da136c985678cd4d27a1b8c63296049032620280704000` hex of data for signing (prefix + data after separator up to the start of the signature)
   * `865a2cc6730e1eeeacd30e6da8e9ab0e9115828d27953ec0c0f985db05da5027` hex of SHA256 of the preimage
 
+> ### On mainnet, with fallback (P2TR) address bc1pptdvg0d2nj99568qn6ssdy4cygnwuxgw2ukmnwgwz7jpqjz2kszse2s3lm
+> 
+lnbc20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqhp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqsfp4pptdvg0d2nj99568qn6ssdy4cygnwuxgw2ukmnwgwz7jpqjz2kszs9qrsgqy606dznq28exnydt2r4c29y56xjtn3sk4mhgjtl4pg2y4ar3249rq4ajlmj9jy8zvlzw7cr8mggqzm842xfr0v72rswzq9xvr4hknfsqwmn6xd
+
+* `lnbc`: prefix, Lightning on Bitcoin mainnet
+* `20m`: amount (20 milli-bitcoin)
+* `1`: Bech32 separator
+* `pvjluez`: timestamp (1496314658)
+* `s`: payment secret...
+* `p`: payment hash...
+* `h`: tagged field: hash of description...
+* `f`: tagged field: fallback address
+  * `p4`: `data_length` (`p` = 1, `4` = 21; 1 * 32 + 21 == 53)
+  * `p`: 1, so witness version 1
+  * `ptdvg0d2nj99568qn6ssdy4cygnwuxgw2ukmnwgwz7jpqjz2kszs`: 260 bits = P2TR.
+* `9`: features...
+* `y606dznq28exnydt2r4c29y56xjtn3sk4mhgjtl4pg2y4ar3249rq4ajlmj9jy8zvlzw7cr8mggqzm842xfr0v72rswzq9xvr4hknfsq`: signature
+* `wmn6xd`: Bech32 checksum
+* Signature breakdown:
+  * `269fa68a6051f26991ab50eb851494d1a4b9c616aeee892ff50a144af471554a3057b2fee45910e267c4ef6067da10016cf5519237b3ca1c1c2014cc1d6f69a6` hex of signature data (32-byte r, 32-byte s)
+  * `0` (int) recovery flag contained in `signature`
+  * `6c6e626332306d0b25fe64500d04444444444444444444444444444444444444444444444444444444444444444021a000081018202830384048000810182028303840480008101820283038404808105c343925b6f67e2c340036ed12093dd44e0368df1b6ea26c53dbe4811f58fd5db8c10486a10adac43daa9c8a5a68e09ea10692b82226ee190e572db9b90e17a410484ab4050280704000` hex of data for signing (prefix + data after separator up to the start of the signature)
+  * `116fdb0f18352c886deb263f6466eb40e5e6518b80231a1f9df86088bfa48043` hex of SHA256 of the preimage
+
 > ### Please send 0.00967878534 BTC for a list of items within one week, amount in pico-BTC
 > lnbc9678785340p1pwmna7lpp5gc3xfm08u9qy06djf8dfflhugl6p7lgza6dsjxq454gxhj9t7a0sd8dgfkx7cmtwd68yetpd5s9xar0wfjn5gpc8qhrsdfq24f5ggrxdaezqsnvda3kkum5wfjkzmfqf3jkgem9wgsyuctwdus9xgrcyqcjcgpzgfskx6eqf9hzqnteypzxz7fzypfhg6trddjhygrcyqezcgpzfysywmm5ypxxjemgw3hxjmn8yptk7untd9hxwg3q2d6xjcmtv4ezq7pqxgsxzmnyyqcjqmt0wfjjq6t5v4khxsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygsxqyjw5qcqp2rzjq0gxwkzc8w6323m55m4jyxcjwmy7stt9hwkwe2qxmy8zpsgg7jcuwz87fcqqeuqqqyqqqqlgqqqqn3qq9q9qrsgqrvgkpnmps664wgkp43l22qsgdw4ve24aca4nymnxddlnp8vh9v2sdxlu5ywdxefsfvm0fq3sesf08uf6q9a2ke0hc9j6z6wlxg5z5kqpu2v9wz
 
@@ -739,6 +773,34 @@ Breakdown:
 * `7hf8he7ecf7n4ffphs6awl9t6676rrclv9ckg3d3ncn7fct63p6s365duk5wrk202cfy3aj5xnnp5gs3vrdvruverwwq7yzhkf5a3xqp`: signature
 * `d05wjc`: Bech32 checksum
 
+> ### Public-key recovery with high-S signature
+> lnbc1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaq9qrsgq357wnc5r2ueh7ck6q93dj32dlqnls087fxdwk8qakdyafkq3yap2r09nt4ndd0unm3z9u5t48y6ucv4r5sg7lk98c77ctvjczkspk5qprc90gx
+
+Breakdown:
+
+* `lnbc`: prefix, Lightning on Bitcoin mainnet
+* `1`: Bech32 separator
+* `pvjluez`: timestamp (1496314658)
+* `s`: payment secret
+  * `p5`: `data_length` (`p` = 1, `5` = 20; 1 * 32 + 20 == 52)
+  * `zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs`: payment secret 1111111111111111111111111111111111111111111111111111111111111111
+* `p`: payment hash
+  * `p5`: `data_length` (`p` = 1, `5` = 20; 1 * 32 + 20 == 52)
+  * `qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypq`: payment hash 0001020304050607080900010203040506070809000102030405060708090102
+* `d`: short description
+  * `pl`: `data_length` (`p` = 1, `l` = 31; 1 * 32 + 31 == 63)
+  * `2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaq`: 'Please consider supporting this project'
+* `9`: features
+  * `qr`: `data_length` (`q` = 0, `r` = 3; 0 * 32 + 3 == 3)
+  * `sgq`: b100000100000000
+* `357wnc5r2ueh7ck6q93dj32dlqnls087fxdwk8qakdyafkq3yap2r09nt4ndd0unm3z9u5t48y6ucv4r5sg7lk98c77ctvjczkspk5qp`: signature
+* `rc90gx`: Bech32 checksum
+* Signature breakdown:
+  * `8d3ce9e28357337f62da0162d9454df827f83cfe499aeb1c1db349d4d8112742a1bcb35d66d6bf93dc445e51753935cc32a3a411efd8a7c7bd85b25815a01b50` hex of signature data (32-byte r, 32-byte s)
+  * `1` (int) recovery flag contained in `signature`
+  * `6c6e62630b25fe64500d04444444444444444444444444444444444444444444444444444444444444444021a00008101820283038404800081018202830384048000810182028303840480810343f506c6561736520636f6e736964657220737570706f7274696e6720746869732070726f6a6563740500e08000` hex of data for signing (prefix + data after separator up to the start of the signature)
+  * `6daf4d488be41ce7cbb487cab1ef2975e5efcea879b20d421f0ef86b07cbb987` hex of SHA256 of the preimage
+
 # Examples of Invalid Invoices
 
 > # Same, but adding invalid unknown feature 100
@@ -783,6 +845,14 @@ Breakdown:
 
 > ### Invalid sub-millisatoshi precision.
 > lnbc2500000001p1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpusp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9qrsgq0lzc236j96a95uv0m3umg28gclm5lqxtqqwk32uuk4k6673k6n5kfvx3d2h8s295fad45fdhmusm8sjudfhlf6dcsxmfvkeywmjdkxcp99202x
+
+> ### Missing required `s` field.
+> lnbc20m1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqhp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqs9qrsgq7ea976txfraylvgzuxs8kgcw23ezlrszfnh8r6qtfpr6cxga50aj6txm9rxrydzd06dfeawfk6swupvz4erwnyutnjq7x39ymw6j38gp49qdkj
+
+
+> ### Non canonical signature (high-S) with 'n' field defined
+> lnbc25m1p70xwfzpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaqnp4q0n326hr8v9zprg8gsvezcch06gfaqqhde2aj730yg0durunfhv66sp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9qrsgqsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygsp5cfzp9ugllvk03rltd6hvndxj26ux6gcxc5azyxk060rj9tzghct5zvjlps76gx8wpq5yuu79688k8gnm2c0al6v608s96l0xzrrlqqwnzxmu
+
 
 # Authors
 
